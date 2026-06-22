@@ -468,6 +468,7 @@ class LeRobotOctopusDataConfig(DataConfigFactory):
     """Data config for Octopus MCAP recordings converted by tools/mcap_to_lerobot_v3.py."""
 
     action_dim: int = 14
+    clip_normalized_state: float | None = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -492,6 +493,14 @@ class LeRobotOctopusDataConfig(DataConfigFactory):
             outputs=[octopus_policy.OctopusOutputs(action_dim=self.action_dim)],
         )
         model_transforms = ModelTransformFactory()(model_config)
+        if self.clip_normalized_state is not None:
+            model_transforms = dataclasses.replace(
+                model_transforms,
+                inputs=(
+                    _transforms.ClipState(-self.clip_normalized_state, self.clip_normalized_state),
+                    *model_transforms.inputs,
+                ),
+            )
 
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
@@ -1064,6 +1073,79 @@ _CONFIGS = [
         exp_name="gxd_pi05_full",
         wandb_enabled=False,
     ),
+    TrainConfig(
+        name="gxd_pi05_state",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dim=14,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/dataV4_MCAP_pi05_rgb",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/xudi_ge/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=2_000,
+            peak_lr=5e-6,
+            decay_steps=50_000,
+            decay_lr=5e-7,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        batch_size=32,
+        num_train_steps=50_004,
+        log_interval=1,
+        save_interval=2000,
+        keep_period=10_000,
+        train_image_augment=False,
+        overwrite=True,
+        exp_name="gxd_pi05_state_bs32",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="gxd_pi05_stateconti",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dim=14,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/dataV4_MCAP_pi05_rgb",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/xudi_ge/openpi/checkpoints/gxd_pi05/gxd_pi05_bs32_stable/4000/params",
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=2000,
+            peak_lr=1e-5,
+            decay_steps=40_000,
+            decay_lr=5e-7,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        batch_size=32,
+        num_train_steps=50_004,
+        log_interval=1,
+        save_interval=2000,
+        keep_period=10_000,
+        train_image_augment=False,
+        overwrite=True,
+        exp_name="gxd_pi05_stateconti_bs32",
+        wandb_enabled=False,
+    ),
+
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),

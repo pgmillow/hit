@@ -31,6 +31,9 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+    # If true, adds the normalized state as a continuous token to the action expert input. This is mainly useful for
+    # experiments that keep pi05's AdaRMS action expert while avoiding discrete state tokens in the prompt.
+    continuous_state_input: bool = False
     # If set, only the first `loss_action_dim` action dimensions are used when computing training loss.
     loss_action_dim: int | None = None
 

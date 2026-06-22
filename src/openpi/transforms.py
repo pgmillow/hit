@@ -146,6 +146,17 @@ class Normalize(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class ClipState(DataTransformFn):
+    min_value: float = -1.0
+    max_value: float = 1.0
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "state" in data:
+            data["state"] = np.clip(data["state"], self.min_value, self.max_value)
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class Unnormalize(DataTransformFn):
     norm_stats: at.PyTree[NormStats] | None
     # If true, will use quantile normalization. Otherwise, normal z-score normalization will be used.
