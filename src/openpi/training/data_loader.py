@@ -1,7 +1,11 @@
 from collections.abc import Iterator, Sequence
+import bisect
+import io
+import json
 import logging
 import multiprocessing
 import os
+import pathlib
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
@@ -9,6 +13,8 @@ import jax
 import jax.numpy as jnp
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
+import pandas as pd
+import PIL.Image
 import torch
 
 import openpi.models.model as _model
@@ -41,6 +47,11 @@ class IterableDataset(Protocol[T_co]):
 
 class DataLoader(Protocol[T_co]):
     """Interface for a data loader."""
+
+    @property
+    def dataset_size(self) -> int | None:
+        """Number of samples in the underlying dataset, if known."""
+        raise NotImplementedError("Subclasses of DataLoader should implement dataset_size.")
 
     def data_config(self) -> _config.DataConfig:
         """Get the data config for this data loader."""
@@ -127,6 +138,69 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+class LocalLeRobotParquetDataset(Dataset):
+    """Minimal local LeRobot parquet reader for v3-style datasets.
+
+    This bypasses HuggingFace datasets' parquet metadata parser, which cannot read some local v3 exports with the
+    current dependency versions used by OpenPI.
+    """
+
+    def __init__(self, repo_id: str, action_horizon: int):
+        home = pathlib.Path(os.environ.get("HF_LEROBOT_HOME", pathlib.Path.home() / ".cache/huggingface/lerobot"))
+        self._root = home / repo_id
+        self._action_horizon = action_horizon
+        self._episodes = [json.loads(line) for line in (self._root / "meta/episodes.jsonl").read_text().splitlines()]
+        self._tasks = {
+            int(item["task_index"]): item["task"]
+            for item in (json.loads(line) for line in (self._root / "meta/tasks.jsonl").read_text().splitlines())
+        }
+        lengths = [int(ep["length"]) for ep in self._episodes]
+        self._episode_ends = np.cumsum(lengths).tolist()
+        self._cache_ep_idx = None
+        self._cache_df = None
+
+    @property
+    def tasks(self) -> dict[int, str]:
+        return self._tasks
+
+    def __len__(self) -> int:
+        return int(self._episode_ends[-1])
+
+    def _load_episode(self, ep_idx: int) -> pd.DataFrame:
+        if self._cache_ep_idx != ep_idx:
+            path = self._root / "data" / "chunk-000" / f"file-{ep_idx:03d}.parquet"
+            self._cache_df = pd.read_parquet(path)
+            self._cache_ep_idx = ep_idx
+        return self._cache_df
+
+    def _parse_image(self, value) -> np.ndarray:
+        if isinstance(value, dict) and "bytes" in value:
+            with PIL.Image.open(io.BytesIO(value["bytes"])) as image:
+                return np.asarray(image.convert("RGB"))
+        return np.asarray(value)
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        idx = index.__index__()
+        ep_pos = bisect.bisect_right(self._episode_ends, idx)
+        ep_start = 0 if ep_pos == 0 else self._episode_ends[ep_pos - 1]
+        local_idx = idx - ep_start
+        ep_idx = int(self._episodes[ep_pos]["episode_index"])
+
+        df = self._load_episode(ep_idx)
+        row = df.iloc[local_idx]
+        actions = np.stack(df["action"].to_numpy()).astype(np.float32)
+        action_indices = np.minimum(np.arange(local_idx, local_idx + self._action_horizon), len(df) - 1)
+
+        return {
+            "observation.images.top": self._parse_image(row["observation.images.top"]),
+            "observation.images.left_wrist": self._parse_image(row["observation.images.left_wrist"]),
+            "observation.images.right_wrist": self._parse_image(row["observation.images.right_wrist"]),
+            "observation.state": np.asarray(row["observation.state"], dtype=np.float32),
+            "action": actions[action_indices],
+            "task_index": np.asarray(row["task_index"], dtype=np.int64),
+        }
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -136,6 +210,14 @@ def create_torch_dataset(
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
+
+    local_root = pathlib.Path(os.environ.get("HF_LEROBOT_HOME", pathlib.Path.home() / ".cache/huggingface/lerobot"))
+    local_dataset_root = local_root / repo_id
+    if (local_dataset_root / "meta/episodes.jsonl").exists() and (local_dataset_root / "data").exists():
+        dataset = LocalLeRobotParquetDataset(repo_id, action_horizon)
+        if data_config.prompt_from_task:
+            dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset.tasks)])
+        return dataset
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
@@ -300,6 +382,8 @@ def create_torch_data_loader(
         seed: The seed to use for shuffling the data.
     """
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
+    dataset_size = len(dataset)
+    logging.info("dataset_size: %s", dataset_size)
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     # Use TorchDataLoader for both frameworks
@@ -334,7 +418,7 @@ def create_torch_data_loader(
         framework=framework,
     )
 
-    return DataLoaderImpl(data_config, data_loader)
+    return DataLoaderImpl(data_config, data_loader, dataset_size=dataset_size)
 
 
 def create_rlds_data_loader(
@@ -367,6 +451,8 @@ def create_rlds_data_loader(
     if framework == "pytorch":
         raise NotImplementedError("PyTorch RLDS data loader is not supported yet")
     dataset = create_rlds_dataset(data_config, action_horizon, batch_size, shuffle=shuffle)
+    dataset_size = len(dataset)
+    logging.info("dataset_size: %s", dataset_size)
     dataset = transform_iterable_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats, is_batched=True)
 
     data_loader = RLDSDataLoader(
@@ -375,7 +461,7 @@ def create_rlds_data_loader(
         num_batches=num_batches,
     )
 
-    return DataLoaderImpl(data_config, data_loader)
+    return DataLoaderImpl(data_config, data_loader, dataset_size=dataset_size)
 
 
 class TorchDataLoader:
@@ -528,9 +614,20 @@ class RLDSDataLoader:
 
 
 class DataLoaderImpl(DataLoader):
-    def __init__(self, data_config: _config.DataConfig, data_loader: TorchDataLoader | RLDSDataLoader):
+    def __init__(
+        self,
+        data_config: _config.DataConfig,
+        data_loader: TorchDataLoader | RLDSDataLoader,
+        *,
+        dataset_size: int | None = None,
+    ):
         self._data_config = data_config
         self._data_loader = data_loader
+        self._dataset_size = dataset_size
+
+    @property
+    def dataset_size(self) -> int | None:
+        return self._dataset_size
 
     def data_config(self) -> _config.DataConfig:
         return self._data_config

@@ -67,6 +67,7 @@ class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
+        self.loss_action_dim = config.loss_action_dim or config.action_dim
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -189,11 +190,31 @@ class Pi0(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
+        loss, _ = self.compute_loss_with_debug(rng, observation, actions, train=train)
+        return loss
+
+    def compute_loss_with_debug(
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+    ):
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        image_abs_max = jax.tree.reduce(
+            jnp.maximum,
+            jax.tree.map(lambda image: jnp.max(jnp.abs(image)), observation.images),
+            initializer=jnp.array(0.0),
+        )
+        image_finite = jax.tree.reduce(
+            jnp.logical_and,
+            jax.tree.map(lambda image: jnp.all(jnp.isfinite(image)), observation.images),
+            initializer=jnp.array(True),
+        ).astype(jnp.float32)
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
+        if self.loss_action_dim < self.action_dim:
+            action_dim_mask = jnp.arange(self.action_dim) < self.loss_action_dim
+            actions = jnp.where(action_dim_mask, actions, 0.0)
+            noise = jnp.where(action_dim_mask, noise, 0.0)
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
         time_expanded = time[..., None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
@@ -210,8 +231,29 @@ class Pi0(_model.BaseModel):
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
-
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        if self.loss_action_dim < self.action_dim:
+            v_t = v_t[..., : self.loss_action_dim]
+            u_t = u_t[..., : self.loss_action_dim]
+        chunked_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        debug = {
+            "actions_abs_max": jnp.max(jnp.abs(actions)),
+            "actions_finite": jnp.all(jnp.isfinite(actions)).astype(jnp.float32),
+            "image_abs_max": image_abs_max,
+            "image_finite": image_finite,
+            "state_abs_max": jnp.max(jnp.abs(observation.state)),
+            "state_finite": jnp.all(jnp.isfinite(observation.state)).astype(jnp.float32),
+            "x_t_abs_max": jnp.max(jnp.abs(x_t)),
+            "x_t_finite": jnp.all(jnp.isfinite(x_t)).astype(jnp.float32),
+            "u_t_abs_max": jnp.max(jnp.abs(u_t)),
+            "u_t_finite": jnp.all(jnp.isfinite(u_t)).astype(jnp.float32),
+            "v_t_abs_max": jnp.max(jnp.abs(v_t)),
+            "v_t_finite": jnp.all(jnp.isfinite(v_t)).astype(jnp.float32),
+            "chunk_loss_abs_max": jnp.max(jnp.abs(chunked_loss)),
+            "chunk_loss_finite": jnp.all(jnp.isfinite(chunked_loss)).astype(jnp.float32),
+            "time_min": jnp.min(time),
+            "time_max": jnp.max(time),
+        }
+        return chunked_loss, debug
 
     @override
     def sample_actions(

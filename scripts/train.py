@@ -1,6 +1,7 @@
 import dataclasses
 import functools
 import logging
+import math
 import platform
 from typing import Any
 
@@ -13,6 +14,7 @@ import jax.experimental
 import jax.numpy as jnp
 import numpy as np
 import optax
+from torch.utils.tensorboard import SummaryWriter
 import tqdm_loggable.auto as tqdm
 import wandb
 
@@ -70,6 +72,17 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
         wandb.run.log_code(epath.Path(__file__).parent.parent)
 
 
+def init_tensorboard(config: _config.TrainConfig, *, enabled: bool = True) -> SummaryWriter | None:
+    if not enabled:
+        return None
+
+    tb_subdir = getattr(config, "tensorboard_subdir", "tb")
+    tb_dir = config.checkpoint_dir / tb_subdir
+    tb_dir.mkdir(parents=True, exist_ok=True)
+    logging.info("[stage] tensorboard: writing logs to %s", tb_dir)
+    return SummaryWriter(log_dir=str(tb_dir))
+
+
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
     """Loads and validates the weights. Returns a loaded subset of the weights."""
     loaded_params = loader.load(params_shape)
@@ -85,7 +98,14 @@ def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shap
 def init_train_state(
     config: _config.TrainConfig, init_rng: at.KeyArrayLike, mesh: jax.sharding.Mesh, *, resume: bool
 ) -> tuple[training_utils.TrainState, Any]:
+    logging.info("[stage] init_train_state: creating optimizer")
     tx = _optimizer.create_optimizer(config.optimizer, config.lr_schedule, weight_decay_mask=None)
+    if config.gradient_accumulation_steps > 1:
+        logging.info(
+            "[stage] init_train_state: enabling gradient accumulation steps=%s",
+            config.gradient_accumulation_steps,
+        )
+        tx = optax.MultiSteps(tx, every_k_schedule=config.gradient_accumulation_steps)
 
     def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
         rng, model_rng = jax.random.split(rng)
@@ -113,22 +133,29 @@ def init_train_state(
             ema_params=None if config.ema_decay is None else params,
         )
 
+    logging.info("[stage] init_train_state: evaluating model/train-state shapes")
     train_state_shape = jax.eval_shape(init, init_rng)
+    logging.info("[stage] init_train_state: creating FSDP sharding")
     state_sharding = sharding.fsdp_sharding(train_state_shape, mesh, log=True)
 
     if resume:
+        logging.info("[stage] init_train_state: resume=True, returning shape for checkpoint restore")
         return train_state_shape, state_sharding
 
+    logging.info("[stage] init_train_state: loading base checkpoint weights")
     partial_params = _load_weights_and_validate(config.weight_loader, train_state_shape.params.to_pure_dict())
+    logging.info("[stage] init_train_state: base checkpoint weights loaded and validated")
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
     # Initialize the train state and mix in the partial params.
+    logging.info("[stage] init_train_state: JIT initializing train state with loaded weights")
     train_state = jax.jit(
         init,
         donate_argnums=(1,),  # donate the partial params buffer.
         in_shardings=replicated_sharding,
         out_shardings=state_sharding,
     )(init_rng, partial_params)
+    logging.info("[stage] init_train_state: train state initialized")
 
     return train_state, state_sharding
 
@@ -143,28 +170,56 @@ def train_step(
     model = nnx.merge(state.model_def, state.params)
     model.train()
 
+    def tree_all_finite(tree):
+        finite_tree = jax.tree.map(lambda x: jnp.all(jnp.isfinite(x)), tree)
+        return jax.tree.reduce(jnp.logical_and, finite_tree, initializer=jnp.array(True))
+
     @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-        return jnp.mean(chunked_loss)
+        train_image_augment = getattr(config, "train_image_augment", True)
+        if hasattr(model, "compute_loss_with_debug"):
+            chunked_loss, loss_debug = model.compute_loss_with_debug(
+                rng, observation, actions, train=train_image_augment
+            )
+        else:
+            chunked_loss = model.compute_loss(rng, observation, actions, train=train_image_augment)
+            loss_debug = {}
+        return jnp.mean(chunked_loss), loss_debug
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    (loss, loss_debug), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
+        model, train_rng, observation, actions
+    )
+    grad_norm = optax.global_norm(grads)
+    grads_finite = jnp.isfinite(grad_norm)
+    loss_finite = jnp.isfinite(loss)
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
+    update_abs_max = jax.tree.reduce(
+        jnp.maximum,
+        jax.tree.map(lambda update: jnp.max(jnp.abs(update)), updates),
+        initializer=jnp.array(0.0),
+    )
+    candidate_params = optax.apply_updates(params, updates)
+    update_finite = jnp.logical_and(
+        jnp.logical_and(loss_finite, grads_finite),
+        jnp.logical_and(tree_all_finite(updates), tree_all_finite(candidate_params)),
+    )
+    updates = jax.tree.map(lambda update: jnp.where(update_finite, update, jnp.zeros_like(update)), updates)
     new_params = optax.apply_updates(params, updates)
 
     # Update the model in place and return the new full state.
     nnx.update(model, new_params)
     new_params = nnx.state(model)
 
+    new_opt_state = jax.tree.map(lambda new, old: jnp.where(update_finite, new, old), new_opt_state, state.opt_state)
     new_state = dataclasses.replace(state, step=state.step + 1, params=new_params, opt_state=new_opt_state)
     if state.ema_decay is not None:
         new_state = dataclasses.replace(
@@ -185,8 +240,10 @@ def train_step(
     )
     info = {
         "loss": loss,
-        "grad_norm": optax.global_norm(grads),
+        "grad_norm": grad_norm,
+        "update_abs_max": update_abs_max,
         "param_norm": optax.global_norm(kernel_params),
+        "nonfinite": 1.0 - update_finite.astype(jnp.float32),
     }
     return new_state, info
 
@@ -194,14 +251,29 @@ def train_step(
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
+    logging.info("[stage] startup: validating device and batch configuration")
 
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(
             f"Batch size {config.batch_size} must be divisible by the number of devices {jax.device_count()}."
         )
+    effective_batch_size = config.batch_size * config.gradient_accumulation_steps
+    logging.info(
+        "[stage] startup: batch_size=%s gradient_accumulation_steps=%s effective_batch_size=%s",
+        config.batch_size,
+        config.gradient_accumulation_steps,
+        effective_batch_size,
+    )
 
+    logging.info(
+        "[stage] startup: jax backend=%s device_count=%s devices=%s",
+        jax.default_backend(),
+        jax.device_count(),
+        jax.devices(),
+    )
     jax.config.update("jax_compilation_cache_dir", str(epath.Path("~/.cache/jax").expanduser()))
 
+    logging.info("[stage] startup: creating RNG and sharding mesh")
     rng = jax.random.key(config.seed)
     train_rng, init_rng = jax.random.split(rng)
 
@@ -209,43 +281,74 @@ def main(config: _config.TrainConfig):
     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
+    logging.info("[stage] checkpoint: initializing checkpoint directory")
     checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
         config.checkpoint_dir,
         keep_period=config.keep_period,
         overwrite=config.overwrite,
         resume=config.resume,
     )
+    logging.info("[stage] checkpoint: ready, resuming=%s dir=%s", resuming, config.checkpoint_dir)
+    logging.info("[stage] wandb: initializing")
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+    logging.info("[stage] wandb: initialized")
+    logging.info("[stage] tensorboard: initializing")
+    tensorboard_enabled = getattr(config, "tensorboard_enabled", True)
+    tb_writer = init_tensorboard(config, enabled=tensorboard_enabled)
+    logging.info("[stage] tensorboard: initialized")
 
+    logging.info("[stage] data: creating data loader")
     data_loader = _data_loader.create_data_loader(
         config,
         sharding=data_sharding,
         shuffle=True,
     )
+    steps_per_epoch = None
+    if data_loader.dataset_size is not None:
+        steps_per_epoch = math.ceil(data_loader.dataset_size / effective_batch_size)
+        logging.info(
+            "[stage] data: dataset_size=%s steps_per_epoch=%s configured_num_train_steps=%s",
+            data_loader.dataset_size,
+            steps_per_epoch,
+            config.num_train_steps,
+        )
+    logging.info("[stage] data: fetching first batch")
     data_iter = iter(data_loader)
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     # Log images from first batch to sanity check.
-    images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
-    ]
-    wandb.log({"camera_views": images_to_log}, step=0)
+    if config.wandb_enabled:
+        logging.info("[stage] wandb: logging first batch camera images")
+        images_to_log = [
+            wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
+            for i in range(min(5, len(next(iter(batch[0].images.values())))))
+        ]
+        wandb.log({"camera_views": images_to_log}, step=0)
+        logging.info("[stage] wandb: first batch camera images logged")
+    else:
+        logging.info("[stage] wandb: disabled, skipping first batch camera image logging")
 
+    logging.info("[stage] model: initializing train state")
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
+    logging.info("[stage] model: waiting for train state readiness")
     jax.block_until_ready(train_state)
     logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
 
     if resuming:
+        logging.info("[stage] checkpoint: restoring train state")
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
+        logging.info("[stage] checkpoint: train state restored")
 
+    logging.info("[stage] train: creating JIT train step")
     ptrain_step = jax.jit(
         functools.partial(train_step, config),
         in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
+    logging.info("[stage] train: entering training loop")
+    lr_schedule = config.lr_schedule.create()
 
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
@@ -257,23 +360,40 @@ def main(config: _config.TrainConfig):
 
     infos = []
     for step in pbar:
+        logging.debug("[stage] train: starting step %s", step)
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
+        logging.debug("[stage] train: finished step %s", step)
         infos.append(info)
         if step % config.log_interval == 0:
-            stacked_infos = common_utils.stack_forest(infos)
+            logging.debug("[stage] train: logging metrics for step %s", step)
+            stacked_infos = jax.tree.map(lambda *xs: jnp.stack(xs), *infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
-            info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
+            reduced_info["lr"] = float(jax.device_get(lr_schedule(step)))
+            if steps_per_epoch is not None:
+                reduced_info["epoch"] = step / steps_per_epoch
+            info_str = ", ".join(
+                f"{k}={v:.3e}" if k == "lr" else f"{k}={v:.4f}" for k, v in reduced_info.items()
+            )
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
+            if tb_writer is not None:
+                for key, value in reduced_info.items():
+                    tb_writer.add_scalar(key, value, step)
             infos = []
+        logging.debug("[stage] data: fetching next batch after step %s", step)
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
+            logging.info("[stage] checkpoint: saving step %s", step)
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            logging.info("[stage] checkpoint: save requested for step %s", step)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
+    if tb_writer is not None:
+        tb_writer.flush()
+        tb_writer.close()
 
 
 if __name__ == "__main__":

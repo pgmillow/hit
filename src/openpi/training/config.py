@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.octopus_policy as octopus_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -463,6 +464,45 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotOctopusDataConfig(DataConfigFactory):
+    """Data config for Octopus MCAP recordings converted by tools/mcap_to_lerobot_v3.py."""
+
+    action_dim: int = 14
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "top": "observation.images.top",
+                            "left_wrist": "observation.images.left_wrist",
+                            "right_wrist": "observation.images.right_wrist",
+                        },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[octopus_policy.OctopusInputs()],
+            outputs=[octopus_policy.OctopusOutputs(action_dim=self.action_dim)],
+        )
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=("action",),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -509,6 +549,8 @@ class TrainConfig:
     num_workers: int = 2
     # Number of train steps (batches) to run.
     num_train_steps: int = 30_000
+    # Number of micro-batches to accumulate before each optimizer update.
+    gradient_accumulation_steps: int = 1
 
     # How often (in steps) to log training metrics.
     log_interval: int = 100
@@ -524,6 +566,12 @@ class TrainConfig:
 
     # If true, will enable wandb logging.
     wandb_enabled: bool = True
+    # If true, will enable TensorBoard logging.
+    tensorboard_enabled: bool = True
+    # TensorBoard log subdirectory under checkpoint_dir.
+    tensorboard_subdir: str = "tb"
+    # If true, model-side image augmentation is enabled during training loss computation.
+    train_image_augment: bool = True
 
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
@@ -554,6 +602,8 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError("gradient_accumulation_steps must be >= 1.")
 
 
 # Use `get_config` if you need to get a config by name in your code.
@@ -761,6 +811,33 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
+    TrainConfig(
+        name="pi05_octopus_datatest",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=16,
+            discrete_state_input=False,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/datatest",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=100_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/home/xudi_ge/pi05_base",
+        num_train_steps=20_000,
+        batch_size=8,
+        save_interval=1000,
+        keep_period=5000,
+    ),
     #
     # Fine-tuning Aloha configs.
     #
@@ -963,6 +1040,28 @@ _CONFIGS = [
         num_train_steps=10,
         overwrite=True,
         exp_name="debug_pi05",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="gxd_pi05",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=False,
+            loss_action_dim=14,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/dataV4_MCAP_pi05_rgb",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/xudi_ge/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        batch_size=1,
+        num_train_steps=10,
+        overwrite=True,
+        exp_name="gxd_pi05_full",
         wandb_enabled=False,
     ),
     # RoboArena & PolaRiS configs.

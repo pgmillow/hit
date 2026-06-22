@@ -16,8 +16,10 @@ class TrainState:
     step: at.Int[at.ArrayLike, ""]
     params: nnx.State
     model_def: nnx.GraphDef[_model.BaseModel]
-    opt_state: optax.OptState
-    tx: optax.GradientTransformation = struct.field(pytree_node=False)
+    # Keep these as Any because wrappers like optax.MultiSteps may produce
+    # optimizer states/transformations that are not fully covered by runtime type checks.
+    opt_state: Any
+    tx: Any = struct.field(pytree_node=False)
 
     ema_decay: float | None = struct.field(pytree_node=False)
     ema_params: nnx.State | None = None

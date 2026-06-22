@@ -31,6 +31,8 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+    # If set, only the first `loss_action_dim` action dimensions are used when computing training loss.
+    loss_action_dim: int | None = None
 
     pytorch_compile_mode: str | None = "max-autotune"
 
@@ -46,6 +48,8 @@ class Pi0Config(_model.BaseModelConfig):
                 "max-autotune",
                 "max-autotune-no-cudagraphs",
             ]
+        if self.loss_action_dim is not None:
+            assert 1 <= self.loss_action_dim <= self.action_dim
 
     @property
     @override
