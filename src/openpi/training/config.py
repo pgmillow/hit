@@ -1130,7 +1130,7 @@ _CONFIGS = [
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=2000,
             peak_lr=1e-5,
-            decay_steps=40_000,
+            decay_steps=30_000,
             decay_lr=5e-7,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
@@ -1140,7 +1140,7 @@ _CONFIGS = [
         log_interval=1,
         save_interval=2000,
         keep_period=10_000,
-        train_image_augment=False,
+        train_image_augment=True,
         overwrite=True,
         exp_name="gxd_pi05_stateconti_bs32",
         wandb_enabled=False,

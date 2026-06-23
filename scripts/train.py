@@ -133,22 +133,22 @@ def init_train_state(
             ema_params=None if config.ema_decay is None else params,
         )
 
-    logging.info("[stage] init_train_state: evaluating model/train-state shapes")
+#    logging.info("[stage] init_train_state: evaluating model/train-state shapes")
     train_state_shape = jax.eval_shape(init, init_rng)
-    logging.info("[stage] init_train_state: creating FSDP sharding")
+#    logging.info("[stage] init_train_state: creating FSDP sharding")
     state_sharding = sharding.fsdp_sharding(train_state_shape, mesh, log=True)
 
     if resume:
-        logging.info("[stage] init_train_state: resume=True, returning shape for checkpoint restore")
+#        logging.info("[stage] init_train_state: resume=True, returning shape for checkpoint restore")
         return train_state_shape, state_sharding
 
-    logging.info("[stage] init_train_state: loading base checkpoint weights")
+#    logging.info("[stage] init_train_state: loading base checkpoint weights")
     partial_params = _load_weights_and_validate(config.weight_loader, train_state_shape.params.to_pure_dict())
-    logging.info("[stage] init_train_state: base checkpoint weights loaded and validated")
+#    logging.info("[stage] init_train_state: base checkpoint weights loaded and validated")
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
     # Initialize the train state and mix in the partial params.
-    logging.info("[stage] init_train_state: JIT initializing train state with loaded weights")
+#    logging.info("[stage] init_train_state: JIT initializing train state with loaded weights")
     train_state = jax.jit(
         init,
         donate_argnums=(1,),  # donate the partial params buffer.
