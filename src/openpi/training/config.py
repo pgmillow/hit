@@ -22,6 +22,7 @@ import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.octopus_policy as octopus_policy
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
@@ -572,6 +573,13 @@ class TrainConfig:
     overwrite: bool = False
     # If true, will resume training from the last checkpoint.
     resume: bool = False
+    # If set (and not resuming from this run's own dir), restore the FULL train_state
+    # (params + optimizer state + step) from this external checkpoint directory before
+    # training, then save into checkpoint_dir. Use to continue from another experiment's
+    # checkpoint with a warm optimizer (avoids cold-Adam restarts).
+    resume_from_checkpoint_dir: str | None = None
+    # Step to restore from resume_from_checkpoint_dir. None = latest available.
+    resume_from_checkpoint_step: int | None = None
 
     # If true, will enable wandb logging.
     wandb_enabled: bool = True
@@ -579,6 +587,8 @@ class TrainConfig:
     tensorboard_enabled: bool = True
     # TensorBoard log subdirectory under checkpoint_dir.
     tensorboard_subdir: str = "tb"
+    # Added to logged step for TB/wandb when continuing a run without resume.
+    log_step_offset: int = 0
     # If true, model-side image augmentation is enabled during training loss computation.
     train_image_augment: bool = True
 
@@ -1074,6 +1084,147 @@ _CONFIGS = [
         wandb_enabled=False,
     ),
     TrainConfig(
+        name="gxd_pi05_629",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dim=14,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/openpi_V5_mcap0625_rgb",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/xudi_ge/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        lr_schedule=_optimizer.GxdPiecewiseLinearSchedule(
+            milestone_steps=(0, 1_000, 10_000, 20_000, 30_000, 40_000),
+            milestone_lrs=(0.0, 2e-5, 1e-5, 5e-6, 2e-6, 1e-7),
+        ),
+        batch_size=32,
+        num_workers=0,
+        num_train_steps=40_000,
+        ema_decay=0.99,
+        save_interval=1000,
+        keep_period=5000,
+        checkpoint_base_dir="/data/checkpoint_629",
+        overwrite=True,
+        exp_name="gxd_pi05_629_full",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="gxd_pi05_629_from4k_low_lr",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dim=14,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/openpi_V5_mcap0625_rgb",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data/checkpoint_629/gxd_pi05_629/gxd_pi05_629_full/4000/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=0,
+            peak_lr=1e-5,
+            decay_steps=20_000,
+            decay_lr=1e-7,
+        ),
+        batch_size=32,
+        num_workers=8,
+        num_train_steps=20_000,
+        ema_decay=None,
+        save_interval=1000,
+        keep_period=5000,
+        checkpoint_base_dir="/data/checkpoint_629",
+        overwrite=False,
+        resume=False,
+        resume_from_checkpoint_dir=None,
+        resume_from_checkpoint_step=None,
+        exp_name="gxd_pi05_629_from4k_low_lr_gpu23_offset",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="gxd_pi05_629_from4k_conti_lr",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dim=14,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/openpi_V5_mcap0625_rgb",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data/checkpoint_629/gxd_pi05_629/gxd_pi05_629_full/4000/params"
+        ),
+        lr_schedule=_optimizer.GxdPiecewiseLinearSchedule(
+            milestone_steps=(0, 1_000, 10_000, 20_000, 30_000, 40_000),
+            milestone_lrs=(0.0, 2e-5, 1e-5, 5e-6, 2e-6, 1e-7),
+            schedule_offset=4000,
+        ),
+        batch_size=32,
+        num_workers=2,
+        num_train_steps=36_000,
+        ema_decay=None,
+        save_interval=1000,
+        keep_period=5000,
+        checkpoint_base_dir="/data/checkpoint_629",
+        overwrite=False,
+        resume=False,
+        resume_from_checkpoint_dir=None,
+        resume_from_checkpoint_step=None,
+        exp_name="gxd_pi05_629_from4k_conti_lr_gpu23_offset_compare",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="Pi05_630",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dim=14,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/dataV4_MCAP_pi05_rgb",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/xudi_ge/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        lr_schedule=_optimizer.GxdPiecewiseLinearSchedule(
+            milestone_steps=(0, 1_000, 10_000, 20_000, 30_000, 40_000),
+            milestone_lrs=(0.0, 1e-5, 1e-6, 5e-7, 2e-8, 1e-9),
+        ),
+        batch_size=32,
+        num_workers=0,
+        num_train_steps=40_000,
+        ema_decay=None,
+        save_interval=1000,
+        keep_period=5000,
+        checkpoint_base_dir="/data/checkpoint_630",
+        overwrite=True,
+        exp_name="Pi05_630_full",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
         name="gxd_pi05_state",
         model=pi0_config.Pi0Config(
             pi05=True,
@@ -1145,6 +1296,163 @@ _CONFIGS = [
         exp_name="gxd_pi05_stateconti_bs32",
         wandb_enabled=False,
     ),
+    TrainConfig(
+        name="gxd_pi05_stateconti_from6000_lrhalf",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dim=14,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/dataV4_MCAP_pi05_rgb",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data/gxdcheckpoint/gxd_pi05_stateconti/gxd_pi05_standard_state_from4000_3epoch/6000/params",
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=50,
+            peak_lr=2.5e-6,
+            decay_steps=30_000,
+            decay_lr=1.25e-7,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        batch_size=32,
+        num_train_steps=50_004,
+        log_interval=1,
+        save_interval=2000,
+        keep_period=10_000,
+        train_image_augment=True,
+        overwrite=False,
+        resume=True,
+        exp_name="gxd_pi05_standard_state_from6000_lrhalf",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="gxd_pi05_from10000_staged_lr",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dim=14,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/dataV4_MCAP_pi05_rgb",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data/gxdcheckpoint/gxd_pi05_stateconti_from6000_lrhalf/"
+            "gxd_pi05_standard_state_from6000_lrhalf/10000/params",
+        ),
+        lr_schedule=_optimizer.StagedCosineSchedule(
+            init_lr=1.5e-6,
+            steps_per_stage=3000,
+            total_steps=16_668,
+            decay_factor=5.0,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        batch_size=32,
+        num_train_steps=16_668,
+        log_interval=10,
+        save_interval=1000,
+        keep_period=3000,  # 每 3k 阶段末永久保留 (3k/6k/9k/12k/15k/16668)
+        train_image_augment=False,
+        overwrite=True,
+        resume=False,
+        exp_name="gxd_pi05_from10000_staged_lr",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="gxd_pi05_from2000_staged_lr",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dim=14,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/dataV4_MCAP_pi05_rgb",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data/gxdcheckpoint/gxd_pi05_from10000_staged_lr/"
+            "gxd_pi05_from10000_staged_lr/2000/params",
+        ),
+        lr_schedule=_optimizer.StagedCosineSchedule(
+            init_lr=3e-6,
+            steps_per_stage=3000,
+            total_steps=16_668,
+            decay_factor=5.0,
+            schedule_offset=2000,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        batch_size=32,
+        num_train_steps=14_668,
+        log_interval=10,
+        log_step_offset=2000,
+        save_interval=1000,
+        keep_period=3000,
+        train_image_augment=False,
+        overwrite=True,
+        resume=False,
+        exp_name="gxd_pi05_from2000_staged_lr",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="gxd_pi05_V5_mcap0625_rgb",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dim=14,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/openpi_V5_mcap0625_rgb",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/xudi_ge/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        lr_schedule=_optimizer.GxdMilestoneSchedule(
+            plateau_lr=5e-6,
+            lr_at_6k=1e-6,
+            lr_at_12k=1e-7,
+            plateau_end=3_000,
+            decay_steps_to_1e6=3_000,
+            decay_steps_to_1e7=6_000,
+            total_steps=30_000,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        batch_size=32,
+        num_workers=0,
+        num_train_steps=30_000,
+        log_interval=10,
+        save_interval=1000,
+        keep_period=3000,
+        checkpoint_base_dir="/data/gxdcheckpoint",
+        train_image_augment=False,
+        overwrite=True,
+        resume=False,
+        exp_name="gxd_pi05_V5_mcap0625_rgb",
+        wandb_enabled=False,
+    ),
 
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
@@ -1168,3 +1476,5 @@ def get_config(config_name: str) -> TrainConfig:
         raise ValueError(f"Config '{config_name}' not found.{closest_str}")
 
     return _CONFIGS_DICT[config_name]
+
+

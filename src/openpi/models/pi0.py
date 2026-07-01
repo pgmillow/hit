@@ -69,6 +69,7 @@ class Pi0(_model.BaseModel):
         self.pi05 = config.pi05
         self.continuous_state_input = config.continuous_state_input
         self.loss_action_dim = config.loss_action_dim or config.action_dim
+        self.loss_action_dims = config.loss_action_dims
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -213,10 +214,13 @@ class Pi0(_model.BaseModel):
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
-        if self.loss_action_dim < self.action_dim:
+        if self.loss_action_dims is not None:
+            action_dim_mask = jnp.isin(jnp.arange(self.action_dim), jnp.array(self.loss_action_dims))
+        else:
             action_dim_mask = jnp.arange(self.action_dim) < self.loss_action_dim
-            actions = jnp.where(action_dim_mask, actions, 0.0)
-            noise = jnp.where(action_dim_mask, noise, 0.0)
+        actions = jnp.where(action_dim_mask, actions, 0.0)
+        noise = jnp.where(action_dim_mask, noise, 0.0)
+        action_dim_count = jnp.sum(action_dim_mask)
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
         time_expanded = time[..., None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
@@ -233,10 +237,9 @@ class Pi0(_model.BaseModel):
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
-        if self.loss_action_dim < self.action_dim:
-            v_t = v_t[..., : self.loss_action_dim]
-            u_t = u_t[..., : self.loss_action_dim]
-        chunked_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        sq_err = jnp.square(v_t - u_t)
+        active_sq_err = jnp.where(action_dim_mask, sq_err, 0.0)
+        chunked_loss = jnp.sum(active_sq_err, axis=-1) / action_dim_count
         debug = {
             "actions_abs_max": jnp.max(jnp.abs(actions)),
             "actions_finite": jnp.all(jnp.isfinite(actions)).astype(jnp.float32),

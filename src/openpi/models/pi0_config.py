@@ -36,6 +36,9 @@ class Pi0Config(_model.BaseModelConfig):
     continuous_state_input: bool = False
     # If set, only the first `loss_action_dim` action dimensions are used when computing training loss.
     loss_action_dim: int | None = None
+    # If set, exactly these action dimensions are used when computing training loss. This takes precedence over
+    # `loss_action_dim` and is useful when the active action dimensions are not a prefix.
+    loss_action_dims: tuple[int, ...] | None = None
 
     pytorch_compile_mode: str | None = "max-autotune"
 
@@ -53,6 +56,10 @@ class Pi0Config(_model.BaseModelConfig):
             ]
         if self.loss_action_dim is not None:
             assert 1 <= self.loss_action_dim <= self.action_dim
+        if self.loss_action_dims is not None:
+            assert len(self.loss_action_dims) > 0
+            assert all(0 <= dim < self.action_dim for dim in self.loss_action_dims)
+            assert len(set(self.loss_action_dims)) == len(self.loss_action_dims)
 
     @property
     @override
