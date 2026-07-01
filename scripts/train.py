@@ -289,6 +289,17 @@ def main(config: _config.TrainConfig):
         resume=config.resume,
     )
     logging.info("[stage] checkpoint: ready, resuming=%s dir=%s", resuming, config.checkpoint_dir)
+    # External warm-restart: restore full train_state from another experiment's checkpoint.
+    external_restore_dir = getattr(config, "resume_from_checkpoint_dir", None)
+    external_restore_step = getattr(config, "resume_from_checkpoint_step", None)
+    external_restore = (not resuming) and external_restore_dir is not None
+    if external_restore:
+        logging.info(
+            "[stage] checkpoint: will restore full train_state from %s step=%s into %s",
+            external_restore_dir,
+            external_restore_step if external_restore_step is not None else "latest",
+            config.checkpoint_dir,
+        )
     logging.info("[stage] wandb: initializing")
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
     logging.info("[stage] wandb: initialized")
@@ -330,7 +341,9 @@ def main(config: _config.TrainConfig):
         logging.info("[stage] wandb: disabled, skipping first batch camera image logging")
 
     logging.info("[stage] model: initializing train state")
-    train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
+    train_state, train_state_sharding = init_train_state(
+        config, init_rng, mesh, resume=resuming or external_restore
+    )
     logging.info("[stage] model: waiting for train state readiness")
     jax.block_until_ready(train_state)
     logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
@@ -339,6 +352,15 @@ def main(config: _config.TrainConfig):
         logging.info("[stage] checkpoint: restoring train state")
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
         logging.info("[stage] checkpoint: train state restored")
+    elif external_restore:
+        logging.info("[stage] checkpoint: restoring full train state from external source")
+        source_manager = _checkpoints.open_readonly_checkpoint_manager(external_restore_dir)
+        train_state = _checkpoints.restore_state(
+            source_manager, train_state, data_loader, step=external_restore_step
+        )
+        logging.info(
+            "[stage] checkpoint: external train state restored (step=%s)", int(train_state.step)
+        )
 
     logging.info("[stage] train: creating JIT train step")
     ptrain_step = jax.jit(
@@ -349,6 +371,7 @@ def main(config: _config.TrainConfig):
     )
     logging.info("[stage] train: entering training loop")
     lr_schedule = config.lr_schedule.create()
+    log_step_offset = getattr(config, "log_step_offset", 0)
 
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
@@ -370,24 +393,27 @@ def main(config: _config.TrainConfig):
             stacked_infos = jax.tree.map(lambda *xs: jnp.stack(xs), *infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
             reduced_info["lr"] = float(jax.device_get(lr_schedule(step)))
+            global_step = step + log_step_offset
             if steps_per_epoch is not None:
-                reduced_info["epoch"] = step / steps_per_epoch
+                reduced_info["epoch"] = global_step / steps_per_epoch
             info_str = ", ".join(
                 f"{k}={v:.3e}" if k == "lr" else f"{k}={v:.4f}" for k, v in reduced_info.items()
             )
-            pbar.write(f"Step {step}: {info_str}")
-            wandb.log(reduced_info, step=step)
+            pbar.write(f"Step {global_step}: {info_str}")
+            wandb.log(reduced_info, step=global_step)
             if tb_writer is not None:
                 for key, value in reduced_info.items():
-                    tb_writer.add_scalar(key, value, step)
+                    tb_writer.add_scalar(key, value, global_step)
             infos = []
         logging.debug("[stage] data: fetching next batch after step %s", step)
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
-            logging.info("[stage] checkpoint: saving step %s", step)
-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
-            logging.info("[stage] checkpoint: save requested for step %s", step)
+            # Name the final checkpoint after num_train_steps so stage milestones align (e.g. 9000).
+            save_step = config.num_train_steps if step == config.num_train_steps - 1 else step
+            logging.info("[stage] checkpoint: saving step %s", save_step)
+            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, save_step)
+            logging.info("[stage] checkpoint: save requested for step %s", save_step)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()

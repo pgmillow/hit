@@ -62,6 +62,26 @@ def initialize_checkpoint_dir(
     return mngr, resuming
 
 
+def open_readonly_checkpoint_manager(checkpoint_dir: epath.Path | str) -> ocp.CheckpointManager:
+    """Open an existing checkpoint directory read-only (no GC / no deletion of old steps).
+
+    Used to restore a full train_state from another experiment's checkpoint without
+    mutating the source directory.
+    """
+    checkpoint_dir = epath.Path(checkpoint_dir).resolve()
+    if not checkpoint_dir.exists():
+        raise FileNotFoundError(f"resume_from_checkpoint_dir does not exist: {checkpoint_dir}")
+    return ocp.CheckpointManager(
+        checkpoint_dir,
+        item_handlers={
+            "assets": CallbackHandler(),
+            "train_state": ocp.PyTreeCheckpointHandler(),
+            "params": ocp.PyTreeCheckpointHandler(),
+        },
+        options=ocp.CheckpointManagerOptions(create=False, read_only=True),
+    )
+
+
 def save_state(
     checkpoint_manager: ocp.CheckpointManager,
     state: training_utils.TrainState,

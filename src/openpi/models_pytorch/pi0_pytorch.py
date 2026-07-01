@@ -86,6 +86,8 @@ class PI0Pytorch(nn.Module):
         super().__init__()
         self.config = config
         self.pi05 = config.pi05
+        self.loss_action_dim = config.loss_action_dim or config.action_dim
+        self.loss_action_dims = config.loss_action_dims
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -321,6 +323,15 @@ class PI0Pytorch(nn.Module):
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
 
+        if self.loss_action_dims is not None:
+            loss_action_dim_mask = torch.zeros(self.config.action_dim, dtype=torch.bool, device=actions.device)
+            loss_action_dim_mask[list(self.loss_action_dims)] = True
+        else:
+            loss_action_dim_mask = torch.arange(self.config.action_dim, device=actions.device) < self.loss_action_dim
+        actions = torch.where(loss_action_dim_mask, actions, torch.zeros_like(actions))
+        noise = torch.where(loss_action_dim_mask, noise, torch.zeros_like(noise))
+        loss_action_dim_count = loss_action_dim_mask.sum()
+
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
 
@@ -371,7 +382,9 @@ class PI0Pytorch(nn.Module):
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
 
-        return F.mse_loss(u_t, v_t, reduction="none")
+        sq_err = F.mse_loss(u_t, v_t, reduction="none")
+        sq_err = torch.where(loss_action_dim_mask, sq_err, torch.zeros_like(sq_err))
+        return sq_err.sum(dim=-1) / loss_action_dim_count
 
     @torch.no_grad()
     def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:

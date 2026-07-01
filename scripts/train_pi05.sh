@@ -67,8 +67,8 @@ ARGS=(
   --ema-decay "${EMA_DECAY}"
 )
 
-[[ "${OVERWRITE}" == "true" ]] && ARGS+=(--overwrite)
-[[ "${RESUME}" == "true" ]]    && ARGS+=(--resume)
+if [[ "${OVERWRITE}" == "true" ]]; then ARGS+=(--overwrite); else ARGS+=(--no-overwrite); fi
+if [[ "${RESUME}" == "true" ]]; then ARGS+=(--resume); else ARGS+=(--no-resume); fi
 if [[ "${WANDB}" == "true" ]]; then ARGS+=(--wandb-enabled); else ARGS+=(--no-wandb-enabled); fi
 if [[ "${TENSORBOARD}" == "true" ]]; then ARGS+=(--tensorboard-enabled --tensorboard-subdir tb); else ARGS+=(--no-tensorboard-enabled); fi
 if [[ "${train_image_augment:-true}" == "true" ]]; then ARGS+=(--train-image-augment); else ARGS+=(--no-train-image-augment); fi

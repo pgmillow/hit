@@ -168,7 +168,16 @@ class LocalLeRobotParquetDataset(Dataset):
 
     def _load_episode(self, ep_idx: int) -> pd.DataFrame:
         if self._cache_ep_idx != ep_idx:
-            path = self._root / "data" / "chunk-000" / f"file-{ep_idx:03d}.parquet"
+            chunk_dir = self._root / "data" / "chunk-000"
+            candidates = [
+                chunk_dir / f"file-{ep_idx:03d}.parquet",
+                chunk_dir / f"episode_{ep_idx:06d}.parquet",
+            ]
+            path = next((p for p in candidates if p.exists()), None)
+            if path is None:
+                raise FileNotFoundError(
+                    f"No parquet for episode {ep_idx} in {chunk_dir}. Tried: {[p.name for p in candidates]}"
+                )
             self._cache_df = pd.read_parquet(path)
             self._cache_ep_idx = ep_idx
         return self._cache_df

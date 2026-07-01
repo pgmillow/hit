@@ -56,6 +56,31 @@ class CheckpointWeightLoader(WeightLoader):
 
 
 @dataclasses.dataclass(frozen=True)
+class CheckpointWithOverridesWeightLoader(WeightLoader):
+    """Loads a primary checkpoint, then overrides selected parameter prefixes from another checkpoint."""
+
+    params_path: str
+    override_params_path: str
+    override_prefixes: tuple[str, ...]
+    missing_regex: str = ".*lora.*"
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        override_params = _model.restore_params(
+            download.maybe_download(self.override_params_path), restore_type=np.ndarray
+        )
+
+        flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
+        flat_override = flax.traverse_util.flatten_dict(override_params, sep="/")
+        for key, value in flat_override.items():
+            if any(key == prefix or key.startswith(f"{prefix}/") for prefix in self.override_prefixes):
+                flat_loaded[key] = value
+
+        loaded_params = flax.traverse_util.unflatten_dict(flat_loaded, sep="/")
+        return _merge_params(loaded_params, params, missing_regex=self.missing_regex)
+
+
+@dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
     """Loads weights from the official PaliGemma checkpoint.
 
