@@ -142,7 +142,9 @@ class Normalize(DataTransformFn):
         assert stats.q01 is not None
         assert stats.q99 is not None
         q01, q99 = stats.q01[..., : x.shape[-1]], stats.q99[..., : x.shape[-1]]
-        return (x - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0
+        span = q99 - q01
+        # Near-constant dims (span < 0.005): map to 0 to avoid noise amplification.
+        return np.where(span < 0.005, 0.0, (x - q01) / (span + 1e-6) * 2.0 - 1.0)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -187,9 +189,23 @@ class Unnormalize(DataTransformFn):
         assert stats.q01 is not None
         assert stats.q99 is not None
         q01, q99 = stats.q01, stats.q99
+        span = q99 - q01
+        # Near-constant dims (span < 0.005): always restore to midpoint (q01+q99)/2.
+        # This ensures left-arm frozen joints and left-hand (q01=q99=1000, see
+        # scripts/compute_norm_stats.py's CONSTANT_DIM_OVERRIDES) stay stable.
         if (dim := q01.shape[-1]) < x.shape[-1]:
-            return np.concatenate([(x[..., :dim] + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01, x[..., dim:]], axis=-1)
-        return (x + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
+            span_d = span[..., :dim]
+            recovered = np.where(
+                span_d < 0.005,
+                (q01[..., :dim] + q99[..., :dim]) / 2.0,
+                (x[..., :dim] + 1.0) / 2.0 * (span_d + 1e-6) + q01[..., :dim],
+            )
+            return np.concatenate([recovered, x[..., dim:]], axis=-1)
+        return np.where(
+            span < 0.005,
+            (q01 + q99) / 2.0,
+            (x + 1.0) / 2.0 * (span + 1e-6) + q01,
+        )
 
 
 @dataclasses.dataclass(frozen=True)

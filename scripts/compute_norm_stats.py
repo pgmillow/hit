@@ -5,6 +5,7 @@ will compute the mean and standard deviation of the data in the dataset and save
 to the config assets directory.
 """
 
+import dataclasses
 import pathlib
 
 import numpy as np
@@ -16,6 +17,59 @@ import openpi.shared.normalize as normalize
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.transforms as transforms
+
+
+@dataclasses.dataclass(frozen=True)
+class ConstantDimOverride:
+    """Forces a specific state/action dim to a known constant value when its measured q99-q01 span is small.
+
+    This replaces manually patching norm_stats.json after the fact (see git history /
+    scripts/patch_state_norm_stats.py): if the dim is already near a fixed target value in the raw data
+    (e.g. a hand that is essentially always commanded fully-closed at ~1000), we snap q01=q99=target so
+    that transforms.py's near-constant-dim handling (span < 0.005) kicks in and always outputs `target`
+    on unnormalize, regardless of small sensor/actuator noise around it.
+    """
+
+    key: str  # "state" or "actions"
+    dim: int
+    threshold: float  # if measured (q99 - q01) < threshold, snap to target
+    target: float
+
+
+# left_hand_qpos0 (state[12]) / left_hand_cmd_pos0 (actions[12]): raw readout hovers in ~[950, 1000]
+# (span usually ~2), i.e. effectively always fully-closed. Snap to an exact constant 1000 whenever the
+# measured span is < 50, so this is robust even if the actual sensor noise for a given dataset is a bit
+# larger than what we've observed so far.
+CONSTANT_DIM_OVERRIDES = [
+    ConstantDimOverride(key="state", dim=12, threshold=50.0, target=1000.0),
+    ConstantDimOverride(key="actions", dim=12, threshold=50.0, target=1000.0),
+]
+
+
+def _apply_constant_dim_overrides(norm_stats: dict, overrides: list[ConstantDimOverride]) -> None:
+    """Mutates `norm_stats[key].q01/q99/mean/std[dim]` in place for each override whose span < threshold."""
+    for override in overrides:
+        stats = norm_stats.get(override.key)
+        if stats is None or stats.q01 is None or stats.q99 is None:
+            continue
+        dim = override.dim
+        if dim >= len(stats.q01):
+            continue
+        span = float(stats.q99[dim] - stats.q01[dim])
+        if span < override.threshold:
+            print(
+                f"[compute_norm_stats] {override.key}[{dim}]: measured span={span:.6f} < "
+                f"threshold={override.threshold} -> snapping q01=q99=mean=std0 to constant {override.target}"
+            )
+            stats.q01[dim] = override.target
+            stats.q99[dim] = override.target
+            stats.mean[dim] = override.target
+            stats.std[dim] = 0.0
+        else:
+            print(
+                f"[compute_norm_stats] {override.key}[{dim}]: measured span={span:.6f} >= "
+                f"threshold={override.threshold} -> left as real (non-constant) data, no override applied"
+            )
 
 
 class RemoveStrings(transforms.DataTransformFn):
@@ -109,6 +163,7 @@ def main(config_name: str, max_frames: int | None = None):
             stats[key].update(np.asarray(batch[key]))
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
+    _apply_constant_dim_overrides(norm_stats, CONSTANT_DIM_OVERRIDES)
 
     data_factory = config.data
     assets_dir = pathlib.Path(data_factory.assets.assets_dir or config.assets_dirs)

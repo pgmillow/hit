@@ -20,15 +20,19 @@ class CosineDecaySchedule(LRScheduleConfig):
     peak_lr: float = 2.5e-5
     decay_steps: int = 30_000
     decay_lr: float = 2.5e-6
+    schedule_offset: int = 0
 
     def create(self) -> optax.Schedule:
-        return optax.warmup_cosine_decay_schedule(
+        inner = optax.warmup_cosine_decay_schedule(
             init_value=self.peak_lr / (self.warmup_steps + 1),
             peak_value=self.peak_lr,
             warmup_steps=self.warmup_steps,
             decay_steps=self.decay_steps,
             end_value=self.decay_lr,
         )
+        if self.schedule_offset:
+            return lambda step: inner(step + self.schedule_offset)
+        return inner
 
 
 @dataclasses.dataclass(frozen=True)
@@ -371,6 +375,36 @@ class GxdPiecewiseLinearSchedule(LRScheduleConfig):
         if self.schedule_offset:
             return lambda step: inner(step + self.schedule_offset)
         return inner
+
+
+@dataclasses.dataclass(frozen=True)
+class WarmLinearCosineSchedule(LRScheduleConfig):
+    """Warmup → linear decay → cosine decay.
+
+    Phase 1 [0, warmup_steps):          linear 0 → peak_lr
+    Phase 2 [warmup_steps, linear_end): linear peak_lr → linear_end_lr
+    Phase 3 [linear_end, total_steps):  cosine linear_end_lr → cosine_end_lr
+    """
+
+    peak_lr: float = 2e-5
+    linear_end_lr: float = 1e-5
+    cosine_end_lr: float = 1e-7
+    warmup_steps: int = 1_000
+    linear_end_step: int = 6_000
+    total_steps: int = 40_000
+
+    def create(self) -> optax.Schedule:
+        linear_decay_steps = self.linear_end_step - self.warmup_steps
+        cosine_steps = self.total_steps - self.linear_end_step
+        alpha = self.cosine_end_lr / self.linear_end_lr if self.linear_end_lr > 0 else 0.0
+
+        schedules = [
+            optax.linear_schedule(0.0, self.peak_lr, self.warmup_steps),
+            optax.linear_schedule(self.peak_lr, self.linear_end_lr, linear_decay_steps),
+            optax.cosine_decay_schedule(self.linear_end_lr, cosine_steps, alpha=alpha),
+        ]
+        boundaries = [self.warmup_steps, self.linear_end_step]
+        return optax.join_schedules(schedules, boundaries)
 
 
 @dataclasses.dataclass(frozen=True)

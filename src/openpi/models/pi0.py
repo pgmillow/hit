@@ -70,6 +70,14 @@ class Pi0(_model.BaseModel):
         self.continuous_state_input = config.continuous_state_input
         self.loss_action_dim = config.loss_action_dim or config.action_dim
         self.loss_action_dims = config.loss_action_dims
+        self.image_aug_crop_enabled = config.image_aug_crop_enabled
+        self.image_aug_crop_ratio = config.image_aug_crop_ratio
+        self.image_aug_rotate_deg = config.image_aug_rotate_deg
+        self.image_aug_brightness = config.image_aug_brightness
+        self.image_aug_contrast = config.image_aug_contrast
+        self.image_aug_saturation = config.image_aug_saturation
+        self.image_aug_hue = config.image_aug_hue
+        self.image_aug_prob = config.image_aug_prob
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -200,7 +208,19 @@ class Pi0(_model.BaseModel):
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ):
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
-        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        observation = _model.preprocess_observation(
+            preprocess_rng,
+            observation,
+            train=train,
+            image_aug_crop_enabled=self.image_aug_crop_enabled,
+            image_aug_crop_ratio=self.image_aug_crop_ratio,
+            image_aug_rotate_deg=self.image_aug_rotate_deg,
+            image_aug_brightness=self.image_aug_brightness,
+            image_aug_contrast=self.image_aug_contrast,
+            image_aug_saturation=self.image_aug_saturation,
+            image_aug_hue=self.image_aug_hue,
+            image_aug_prob=self.image_aug_prob,
+        )
         image_abs_max = jax.tree.reduce(
             jnp.maximum,
             jax.tree.map(lambda image: jnp.max(jnp.abs(image)), observation.images),
@@ -240,6 +260,7 @@ class Pi0(_model.BaseModel):
         sq_err = jnp.square(v_t - u_t)
         active_sq_err = jnp.where(action_dim_mask, sq_err, 0.0)
         chunked_loss = jnp.sum(active_sq_err, axis=-1) / action_dim_count
+        dim_loss = jnp.mean(active_sq_err, axis=tuple(range(active_sq_err.ndim - 1)))
         debug = {
             "actions_abs_max": jnp.max(jnp.abs(actions)),
             "actions_finite": jnp.all(jnp.isfinite(actions)).astype(jnp.float32),
@@ -257,6 +278,7 @@ class Pi0(_model.BaseModel):
             "chunk_loss_finite": jnp.all(jnp.isfinite(chunked_loss)).astype(jnp.float32),
             "time_min": jnp.min(time),
             "time_max": jnp.max(time),
+            **{f"loss_dim/{i:02d}": dim_loss[i] for i in range(self.action_dim)},
         }
         return chunked_loss, debug
 

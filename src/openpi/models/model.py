@@ -148,9 +148,24 @@ def preprocess_observation(
     train: bool = False,
     image_keys: Sequence[str] = IMAGE_KEYS,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
+    image_aug_crop_enabled: bool = True,
+    image_aug_crop_ratio: float = 0.95,
+    image_aug_rotate_deg: float = 5.0,
+    image_aug_brightness: float = 0.3,
+    image_aug_contrast: float = 0.4,
+    image_aug_saturation: float = 0.5,
+    image_aug_hue: float = 0.1,
+    image_aug_prob: float = 0.3,
 ) -> Observation:
     """Preprocess the observations by performing image augmentations (if train=True), resizing (if necessary), and
     filling in a default image mask (if necessary).
+
+    Augmentation knobs (only used if train=True):
+        image_aug_crop_enabled: if True, applies RandomCrop+Resize+Rotate to non-wrist cameras.
+        image_aug_crop_ratio: crop keeps this fraction of width/height before resizing back up.
+        image_aug_rotate_deg: rotation augmentation range is (-image_aug_rotate_deg, +image_aug_rotate_deg).
+        image_aug_brightness/contrast/saturation/hue: ColorJitter strengths (<=0 disables that channel).
+        image_aug_prob: probability that the ColorJitter is applied at all (single Bernoulli draw for all channels).
     """
 
     if not set(image_keys).issubset(observation.images):
@@ -170,15 +185,21 @@ def preprocess_observation(
             image = image / 2.0 + 0.5
 
             transforms = []
-            if "wrist" not in key:
+            if image_aug_crop_enabled and "wrist" not in key:
                 height, width = image.shape[1:3]
                 transforms += [
-                    augmax.RandomCrop(int(width * 0.95), int(height * 0.95)),
+                    augmax.RandomCrop(int(width * image_aug_crop_ratio), int(height * image_aug_crop_ratio)),
                     augmax.Resize(width, height),
-                    augmax.Rotate((-5, 5)),
+                    augmax.Rotate((-image_aug_rotate_deg, image_aug_rotate_deg)),
                 ]
             transforms += [
-                augmax.ColorJitter(brightness=0.3, contrast=0.4, saturation=0.5),
+                augmax.ColorJitter(
+                    brightness=image_aug_brightness,
+                    contrast=image_aug_contrast,
+                    saturation=image_aug_saturation,
+                    hue=image_aug_hue,
+                    p=image_aug_prob,
+                ),
             ]
             sub_rngs = jax.random.split(rng, image.shape[0])
             image = jax.vmap(augmax.Chain(*transforms))(sub_rngs, image)

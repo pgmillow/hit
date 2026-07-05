@@ -42,6 +42,18 @@ class Pi0Config(_model.BaseModelConfig):
 
     pytorch_compile_mode: str | None = "max-autotune"
 
+    # Image augmentation knobs (only applied when TrainConfig.train_image_augment=True). Defaults reproduce the
+    # original hardcoded augmentation (crop+rotate on non-wrist cams + brightness/contrast/saturation/hue jitter
+    # with p=0.3).
+    image_aug_crop_enabled: bool = True
+    image_aug_crop_ratio: float = 0.95
+    image_aug_rotate_deg: float = 5.0
+    image_aug_brightness: float = 0.3
+    image_aug_contrast: float = 0.4
+    image_aug_saturation: float = 0.5
+    image_aug_hue: float = 0.1
+    image_aug_prob: float = 0.3
+
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)

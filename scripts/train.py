@@ -179,23 +179,15 @@ def train_step(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         train_image_augment = getattr(config, "train_image_augment", True)
-        if hasattr(model, "compute_loss_with_debug"):
-            chunked_loss, loss_debug = model.compute_loss_with_debug(
-                rng, observation, actions, train=train_image_augment
-            )
-        else:
-            chunked_loss = model.compute_loss(rng, observation, actions, train=train_image_augment)
-            loss_debug = {}
-        return jnp.mean(chunked_loss), loss_debug
+        chunked_loss = model.compute_loss(rng, observation, actions, train=train_image_augment)
+        return jnp.mean(chunked_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    (loss, loss_debug), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
-        model, train_rng, observation, actions
-    )
+    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
     grad_norm = optax.global_norm(grads)
     grads_finite = jnp.isfinite(grad_norm)
     loss_finite = jnp.isfinite(loss)
@@ -326,7 +318,6 @@ def main(config: _config.TrainConfig):
     logging.info("[stage] data: fetching first batch")
     data_iter = iter(data_loader)
     batch = next(data_iter)
-    logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     # Log images from first batch to sanity check.
     if config.wandb_enabled:
@@ -346,7 +337,6 @@ def main(config: _config.TrainConfig):
     )
     logging.info("[stage] model: waiting for train state readiness")
     jax.block_until_ready(train_state)
-    logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
 
     if resuming:
         logging.info("[stage] checkpoint: restoring train state")
@@ -383,13 +373,10 @@ def main(config: _config.TrainConfig):
 
     infos = []
     for step in pbar:
-        logging.debug("[stage] train: starting step %s", step)
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
-        logging.debug("[stage] train: finished step %s", step)
         infos.append(info)
         if step % config.log_interval == 0:
-            logging.debug("[stage] train: logging metrics for step %s", step)
             stacked_infos = jax.tree.map(lambda *xs: jnp.stack(xs), *infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
             reduced_info["lr"] = float(jax.device_get(lr_schedule(step)))
@@ -405,7 +392,6 @@ def main(config: _config.TrainConfig):
                 for key, value in reduced_info.items():
                     tb_writer.add_scalar(key, value, global_step)
             infos = []
-        logging.debug("[stage] data: fetching next batch after step %s", step)
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:

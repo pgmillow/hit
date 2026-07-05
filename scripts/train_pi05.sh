@@ -49,6 +49,10 @@ echo "[train_pi05] GPU      : ${GPUS} (fsdp=${FSDP_DEVICES}, batch=${BATCH_SIZE}
 echo "[train_pi05] 有效batch: ${EFFECTIVE_BATCH} (= batch ${BATCH_SIZE} × grad_accum ${GRAD_ACCUM_STEPS})"
 echo "[train_pi05] 数据帧数 : ${TOTAL_FRAMES}  → 每epoch ${STEPS_PER_EPOCH} 步"
 echo "[train_pi05] 训练时长 : ${EPOCHS} epoch  → 总步数 ${NUM_TRAIN_STEPS} (${STEP_SOURCE})"
+if [[ -n "${LOG_STEP_OFFSET:-}" && "${LOG_STEP_OFFSET}" != "0" ]]; then
+  GLOBAL_END=$(( LOG_STEP_OFFSET + NUM_TRAIN_STEPS ))
+  echo "[train_pi05] 日志步数 : global = local + ${LOG_STEP_OFFSET} (local 0 → global ${LOG_STEP_OFFSET}, 结束 global ${GLOBAL_END})"
+fi
 echo "[train_pi05] NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE}"
 
 # 组装训练参数
@@ -72,6 +76,7 @@ if [[ "${RESUME}" == "true" ]]; then ARGS+=(--resume); else ARGS+=(--no-resume);
 if [[ "${WANDB}" == "true" ]]; then ARGS+=(--wandb-enabled); else ARGS+=(--no-wandb-enabled); fi
 if [[ "${TENSORBOARD}" == "true" ]]; then ARGS+=(--tensorboard-enabled --tensorboard-subdir tb); else ARGS+=(--no-tensorboard-enabled); fi
 if [[ "${train_image_augment:-true}" == "true" ]]; then ARGS+=(--train-image-augment); else ARGS+=(--no-train-image-augment); fi
+if [[ -n "${LOG_STEP_OFFSET:-}" ]]; then ARGS+=(--log-step-offset "${LOG_STEP_OFFSET}"); fi
 
 exec env \
   HF_LEROBOT_HOME="${HF_LEROBOT_HOME}" \
