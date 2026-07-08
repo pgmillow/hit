@@ -1,0 +1,32 @@
+# Train-side dataset schema sample.
+dataset_path: ../../data/processed/lerobot_data
+fps: 60
+image_size: 224
+state_dim: 26
+action_dim: 14
+chunk_size: 30
+num_workers: 4
+use_color_jitter: false
+cameras:
+  - top
+  - left_wrist
+  - right_wrist
+  - left_tactile
+  - right_tactile
+features:
+  observation.images.top:
+    dtype: image
+    shape: [224, 224, 3]
+  observation.images.left_wrist:
+    dtype: image
+    shape: [224, 224, 3]
+  observation.images.right_wrist:
+    dtype: image
+    shape: [224, 224, 3]
+  observation.state:
+    dtype: float32
+    shape: [26]
+  action:
+    # action 始终保持 14D，不能随 state 扩维。
+    dtype: float32
+    shape: [14]

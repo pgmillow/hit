@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Model weights & checkpoints
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.bin
+
+# Outputs & logs
+outputs/
+logs/
+*.log
+
+# Archives
+*.tar.gz
+*.tar
+*.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+wandb/
+dist/
+build/
+*.so
+
+# Third-party (embedded repos)
+third_party/
+
+# Unknown binary
+poy

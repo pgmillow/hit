@@ -1,0 +1,18 @@
+experiment:
+  name: pi05_default
+  task_name: bimanual_manipulation
+  notes: Baseline PI05 project template.
+
+paths:
+  dataset_path: ../../data/processed/lerobot_data
+  output_dir: ../../outputs/checkpoints
+  checkpoint_dir: ../../outputs/checkpoints
+  export_dir: ../../outputs/exports
+  log_dir: ../../outputs/logs
+
+launch:
+  trainer_entry: ""
+  export_entry: ""
+  device: cuda
+  mixed_precision: bf16
+  resume_from_checkpoint: ""

@@ -1,0 +1,11 @@
+name: lerobot312
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip>=24
+  - git
+  - cmake
+  - pkg-config
+  - pip:
+      - -r requirements.txt

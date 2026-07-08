@@ -1,0 +1,123 @@
+bundle:
+  # Real robot deployment reads only this exported bundle.
+  bundle_dir: ../../outputs/exports/pi05_pour_water_v1
+
+runtime:
+  # dry-run: infer and log only; shadow-run: publish /pi05_vla/command/*;
+  # safe-run: publish /pi05_vla/command/* for bridge consumption.
+  mode: shadow-run
+  device: cuda:0
+  secondary_device:
+  multi_gpu_strategy: none
+  dtype: bfloat16
+  inference_hz: 10
+  control_hz: 30
+  chunk_size: 30
+  execute_horizon: 10
+  prefetch_steps: 5
+  blend_steps: 3
+  max_action_age_sec: 0.45
+  max_inference_requests: 1
+  max_pending_chunks: 1
+  fallback_policy: hold_last_action
+  max_delta_per_step: 0.03
+  action_dim: 14
+  state_dim: 26
+  warmup_steps: 2
+  compile_model: true
+  compile_mode: reduce-overhead
+  publish_metrics_hz: 1
+  task: pour water from the bottle into the cup
+
+image:
+  image_size: 224
+  resize_mode: resize_pad
+  # raw avoids JPEG/PNG decompression latency on the deployment machine.
+  # Use compressed on bandwidth-limited links, or both while transitioning.
+  transport: raw
+
+topics:
+  namespace: /pi05_vla
+  observation:
+    top_image: /realsense/top/color/image_raw/compressed
+    left_wrist_image: /realsense/left_hand/color/image_rect_raw/compressed
+    right_wrist_image: /realsense/right_hand/color/image_rect_raw/compressed
+    top_image_raw: /realsense/top/color/image_raw
+    left_wrist_image_raw: /realsense/left_hand/color/image_rect_raw
+    right_wrist_image_raw: /realsense/right_hand/color/image_rect_raw
+    proprioception: /vla_teleop/proprioception
+    # Current picotele aggregate proprioception is [right6, left6].
+    # The collector decodes it into the model's internal left/right fields.
+    proprioception_order: right_left
+    left_hand_state: /inspire/left_hand/joint_states
+    right_hand_state: /inspire/right_hand/joint_states
+    left_ee_position: /left_arm/ee_position
+    left_ee_rpy: /left_arm/ee_rpy
+    right_ee_position: /right_arm/ee_position
+    right_ee_rpy: /right_arm/ee_rpy
+  command:
+    left_arm_joint_target: /pi05_vla/command/left_arm/joint_target
+    right_arm_joint_target: /pi05_vla/command/right_arm/joint_target
+    left_hand_target: /pi05_vla/command/left_hand/target
+    right_hand_target: /pi05_vla/command/right_hand/target
+    status: /pi05_vla/status
+    metrics: /pi05_vla/metrics
+  bridge_output:
+    left_arm_joint_target: /vla/left_arm/safe_joint_target
+    right_arm_joint_target: /vla/right_arm/safe_joint_target
+    left_hand_trigger: /vla/left_hand/trigger
+    right_hand_trigger: /vla/right_hand/trigger
+    left_deadman: /vla/left_arm/deadman
+    right_deadman: /vla/right_arm/deadman
+  mux:
+    teleop_left_arm_joint_target: /teleop/left_arm/safe_joint_target
+    teleop_right_arm_joint_target: /teleop/right_arm/safe_joint_target
+    teleop_left_hand_trigger: /xr/pico/left/trigger
+    teleop_right_hand_trigger: /xr/pico/right/trigger
+    teleop_left_deadman: /xr/pico/left/grip
+    teleop_right_deadman: /xr/pico/right/grip
+    vla_left_arm_joint_target: /vla/left_arm/safe_joint_target
+    vla_right_arm_joint_target: /vla/right_arm/safe_joint_target
+    vla_left_hand_trigger: /vla/left_hand/trigger
+    vla_right_hand_trigger: /vla/right_hand/trigger
+    output_left_arm_joint_target: /mux/left_arm/safe_joint_target
+    output_right_arm_joint_target: /mux/right_arm/safe_joint_target
+    output_left_hand_trigger: /mux/left_hand/trigger
+    output_right_hand_trigger: /mux/right_hand/trigger
+    output_left_deadman: /mux/left_arm/deadman
+    output_right_deadman: /mux/right_arm/deadman
+    vla_enable: /mux/enable_vla
+    status: /mux/status
+
+safety:
+  max_joint_delta_rad: 0.03
+  stale_observation_timeout_s: 0.5
+  command_timeout_s: 0.45
+  clamp_normalized_action: true
+  hold_last_action: true
+  hand_min: 300
+  hand_max: 1000
+  joint_limits:
+    enabled: false
+    left_min_rad: []
+    left_max_rad: []
+    right_min_rad: []
+    right_max_rad: []
+
+bridge:
+  enabled: true
+  # forward_commands publishes only to /vla/* candidate topics; mux decides
+  # whether those candidates can reach picotele.
+  forward_commands: true
+  publish_to_picotele: false
+  speed_scale: 0.25
+  publish_deadman: false
+
+mux:
+  enabled: true
+  default_mode: teleop
+  publish_hz: 60
+  vla_command_timeout_s: 0.45
+  manual_takeover_deadman_threshold: 0.3
+  vla_deadman_value: 1.0
+  status_publish_hz: 2

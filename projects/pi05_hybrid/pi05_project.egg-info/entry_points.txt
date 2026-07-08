@@ -1,0 +1,6 @@
+[console_scripts]
+pi05-bridge-ros = pi05.deploy.cli.bridge_ros:main
+pi05-command-mux-ros = pi05.deploy.cli.command_mux_ros:main
+pi05-deploy-ros = pi05.deploy.cli.deploy_ros:main
+pi05-export-bundle = pi05.train.cli.export_bundle:main
+pi05-train = pi05.train.cli.train:main

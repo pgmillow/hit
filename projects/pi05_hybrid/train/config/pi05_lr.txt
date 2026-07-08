@@ -1,0 +1,9 @@
+# Runtime learning-rate override for train/config/lora.yaml.
+#
+# Edit this file while training is running. It is checked every log_freq real steps.
+# Examples:
+#   lr=5e-5
+#   cosine_k=0.5
+#
+# Leave commented/empty to use the normal cosine scheduler.
+

@@ -1,0 +1,20 @@
+# Human-readable path template for this repository.
+# Paths are intentionally repo-relative so the project can be cloned anywhere.
+
+workspace_root: ..
+project_root: .
+
+datasets:
+  canonical_lerobot_dataset: data/processed/lerobot_data
+  project_raw_dir: data/raw
+  project_interim_dir: data/interim
+  project_processed_dir: data/processed
+
+models:
+  pretrained_pi05_base: lerobot/pi05_base
+
+outputs:
+  root: outputs
+  checkpoints: outputs/checkpoints
+  exports: outputs/exports
+  logs: outputs/logs

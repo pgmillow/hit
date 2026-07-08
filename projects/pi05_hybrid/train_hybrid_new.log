@@ -1,0 +1,25 @@
+bash: /home/gexudi/miniconda3/envs/lerobot-pi/lib/libtinfo.so.6: no version information available (required by bash)
+============================================
+ PI05 LoRA 4-GPU (offline HF, no proxy)
+ config: /home/gexudi/hit/pi05_ws/projects/pi05_hybrid/train/config/lora.yaml
+ GPUs:   0,1,2,3
+============================================
+The following values were not passed to `accelerate launch` and had defaults used instead:
+	`--num_machines` was set to a value of `1`
+To avoid this warning pass in values for each of the problematic parameters or run `accelerate config`.
+[94m========================================================================[0m
+[93m[TensorBoard ALREADY RUNNING][0m
+[93mReusing existing TensorBoard for logdir: /home/gexudi/hit/pi05_ws/projects/pi05_hybrid/outputs/logs/tensorboard[0m
+[94mOpen in browser:[0m [92mhttp://localhost:6011/[0m
+[94m========================================================================[0m
+[train] loading pretrained model on local_rank=0 (staggered to avoid host OOM)
+WARNING:lerobot.configs.policies:Device 'mps' is not available. Switching to 'cuda'.
+WARNING:lerobot.configs.policies:Device 'mps' is not available. Switching to 'cuda'.
+The PI05 model is a direct port of the OpenPI implementation. 
+This implementation follows the original OpenPI structure for compatibility. 
+Original implementation: https://github.com/Physical-Intelligence/openpi
+Loading model from: /home/gexudi/hit/pi05_base
+✓ Loaded state dict from model.safetensors
+WARNING:root:Vision embedding key might need handling: paligemma_with_expert.paligemma.model.vision_tower.vision_model.embeddings.patch_embedding.bias
+WARNING:root:Vision embedding key might need handling: paligemma_with_expert.paligemma.model.vision_tower.vision_model.embeddings.patch_embedding.weight
+Remapped 812 state dict keys

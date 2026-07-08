@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi05-project"
+version = "0.1.0"
+description = "Pi0.5 LoRA fine-tuning project for LeRobot-style VLA data."
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[project.scripts]
+pi05-train = "pi05.train.cli.train:main"
+pi05-export-bundle = "pi05.train.cli.export_bundle:main"
+pi05-deploy-ros = "pi05.deploy.cli.deploy_ros:main"
+pi05-bridge-ros = "pi05.deploy.cli.bridge_ros:main"
+pi05-command-mux-ros = "pi05.deploy.cli.command_mux_ros:main"
+
+[tool.setuptools.packages.find]
+where = ["common/src", "train/src", "deploy/src"]
+include = ["pi05*"]
+namespaces = true
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
+[tool.pytest.ini_options]
+pythonpath = ["common/src", "train/src", "deploy/src"]
+testpaths = ["tests"]

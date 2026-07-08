@@ -1,0 +1,119 @@
+lora:
+  rank: 32
+  alpha: 64
+  dropout: 0.05
+  # Wider LoRA coverage: train attention projections across matched PI05 modules
+  # plus the action expert head.
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - out_proj
+    - action_in_proj
+    - action_out_proj
+    - time_mlp_in
+    - time_mlp_out
+    - linear
+
+
+tactile:
+  enabled: true
+  # 60 FPS 下以 stride=2 采样 8 帧，覆盖约 0.25 秒历史。
+  history_steps: 8
+  history_stride: 2
+  patch_count: 22
+  patch_size: 14
+  input_channels: 1
+  hidden_dim: 256
+  transformer_layers: 4
+  attention_heads: 8
+  mlp_ratio: 4
+  dropout: 0.1
+  zero_init_gate: true
+  tactile_dropout_prob: 0.1
+
+
+data:
+  # Default public-repo location. Point this at your local LeRobot dataset if needed.
+  dataset_path: /home/yangliwen/gxdtest/hit/dataV3
+  fps: 60
+  num_workers: 4
+  chunk_size: 30
+  use_color_jitter: true
+  image_size: 224
+  # 末端位姿为 6D [x, y, z, roll, pitch, yaw]，因此 state_dim=14+2*6=26。
+  state_dim: 26
+  action_dim: 14
+  cameras:
+    - top
+    - left_wrist
+    - right_wrist
+    - left_tactile
+    - right_tactile   
+  features:
+    observation.images.top:
+      dtype: image
+      shape: [224, 224, 3]
+    observation.images.left_wrist:
+      dtype: image
+      shape: [224, 224, 3]
+    observation.images.right_wrist:
+      dtype: image
+      shape: [224, 224, 3]
+    observation.state:
+      dtype: float32
+      shape: [26]
+    action:
+      dtype: float32
+      shape: [14]
+
+model:
+  chunk_size: 30
+  n_action_steps: 30
+  state_dim: 26
+  action_dim: 14
+  # 强制 PI0.5 内部 action_in_proj/action_out_proj 也使用 14D，而不是预训练默认 32D padding。
+  max_action_dim: 14
+  pretrained_path: /home/yangliwen/gxdtest/pi05_base
+  train_expert_only: false
+  dtype: bfloat16
+
+
+training:
+  # 4x24GB profile: keep per-GPU micro-batch conservative to avoid OOM,
+  # then enlarge effective batch via gradient accumulation.
+  batch_size: 1
+  lr: 3.0e-6
+  epochs: 3
+  max_steps_per_epoch: null
+  gradient_accumulation_steps: 6
+  warmup_steps: 0
+  # Save every 2000 real optimizer steps (not micro-steps).
+  checkpoint_freq_steps: 2000
+  checkpoint_freq_epochs: 1
+  # Recommended fast-start budget: stays in the official 3k-6k step regime and
+  # is realistic to finish within roughly <=2 days on a single modern GPU.
+  seed: 42
+  grad_clip_norm: 1.0
+  resume_from_checkpoint:
+  init_adapter_from: /home/yangliwen/gxdtest/pi05_ws_T1/projects/pi05_hybrid/outputs/checkpoints/pi05_hybrid_T/checkpoint_step_latest
+  mixed_precision: bf16
+  # Optional runtime LR control file. Checked every logging.log_freq real steps.
+  # Supported formats:
+  #   lr=5e-5        # absolute learning rate
+  #   cosine_k=0.5   # current cosine scheduler lr * 0.5
+  lr_control_file: ./pi05_lr.txt
+
+logging:
+  project_name: pi05_t
+  run_name: pi05_hybrid_T
+  output_dir: ../../outputs/checkpoints
+  export_dir: ../../outputs/exports
+  use_tensorboard: true
+  tensorboard_dir: ../../outputs/logs/tensorboard
+  tensorboard_auto_launch: true
+  tensorboard_host: localhost
+  tensorboard_port: 6017
+  # Match official LeRobot behavior: average metrics over a fixed window before logging.
+  log_freq: 100
