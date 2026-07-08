@@ -379,11 +379,12 @@ class GxdPiecewiseLinearSchedule(LRScheduleConfig):
 
 @dataclasses.dataclass(frozen=True)
 class WarmLinearCosineSchedule(LRScheduleConfig):
-    """Warmup → linear decay → cosine decay.
+    """Warmup -> linear decay -> cosine decay -> (optional) final linear decay.
 
-    Phase 1 [0, warmup_steps):          linear 0 → peak_lr
-    Phase 2 [warmup_steps, linear_end): linear peak_lr → linear_end_lr
-    Phase 3 [linear_end, total_steps):  cosine linear_end_lr → cosine_end_lr
+    Phase 1 [0, warmup_steps):              linear 0 -> peak_lr
+    Phase 2 [warmup_steps, linear_end_step): linear peak_lr -> linear_end_lr
+    Phase 3 [linear_end_step, cosine_end_step or total_steps): cosine linear_end_lr -> cosine_end_lr
+    Phase 4 [cosine_end_step, total_steps):  linear cosine_end_lr -> final_end_lr  (only if cosine_end_step is set and < total_steps)
     """
 
     peak_lr: float = 2e-5
@@ -391,11 +392,23 @@ class WarmLinearCosineSchedule(LRScheduleConfig):
     cosine_end_lr: float = 1e-7
     warmup_steps: int = 1_000
     linear_end_step: int = 6_000
+    # If None, phase 3 runs to total_steps (no phase 4). If set and < total_steps, phase 4 is a linear decay.
+    cosine_end_step: int | None = None
+    # Final LR at total_steps when phase 4 is enabled. Defaults to cosine_end_lr (i.e. phase 4 is a flat hold if equal).
+    final_end_lr: float | None = None
     total_steps: int = 40_000
+    # When continuing from a checkpoint without resume, shift the schedule so local step 0
+    # uses the LR that the base schedule would assign at schedule_offset.
+    schedule_offset: int = 0
 
     def create(self) -> optax.Schedule:
         linear_decay_steps = self.linear_end_step - self.warmup_steps
-        cosine_steps = self.total_steps - self.linear_end_step
+        cosine_end_step = self.cosine_end_step if self.cosine_end_step is not None else self.total_steps
+        cosine_steps = cosine_end_step - self.linear_end_step
+        if cosine_steps <= 0:
+            raise ValueError(
+                f"cosine_end_step ({cosine_end_step}) must be greater than linear_end_step ({self.linear_end_step})."
+            )
         alpha = self.cosine_end_lr / self.linear_end_lr if self.linear_end_lr > 0 else 0.0
 
         schedules = [
@@ -404,7 +417,19 @@ class WarmLinearCosineSchedule(LRScheduleConfig):
             optax.cosine_decay_schedule(self.linear_end_lr, cosine_steps, alpha=alpha),
         ]
         boundaries = [self.warmup_steps, self.linear_end_step]
-        return optax.join_schedules(schedules, boundaries)
+
+        if self.cosine_end_step is not None and self.cosine_end_step < self.total_steps:
+            final_end_lr = self.final_end_lr if self.final_end_lr is not None else self.cosine_end_lr
+            final_linear_steps = self.total_steps - self.cosine_end_step
+            schedules.append(
+                optax.linear_schedule(self.cosine_end_lr, final_end_lr, final_linear_steps)
+            )
+            boundaries.append(self.cosine_end_step)
+
+        inner = optax.join_schedules(schedules, boundaries)
+        if self.schedule_offset:
+            return lambda step: inner(step + self.schedule_offset)
+        return inner
 
 
 @dataclasses.dataclass(frozen=True)
@@ -444,7 +469,7 @@ class AdamW(OptimizerConfig):
 
     b1: float = 0.9
     b2: float = 0.95
-    eps: float = 1e-8
+    eps: float = 1e-6
     # Changing this to 0 can cause out-of-memory errors for some reason, so we set it to a negligible value.
     weight_decay: float = 1e-10
     clip_gradient_norm: float = 1.0

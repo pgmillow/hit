@@ -587,6 +587,8 @@ class TrainConfig:
     tensorboard_enabled: bool = True
     # TensorBoard log subdirectory under checkpoint_dir.
     tensorboard_subdir: str = "tb"
+    # TensorBoard server port for remote access (0 = don't launch server).
+    tensorboard_port: int = 6006
     # Added to logged step for TB/wandb when continuing a run without resume.
     log_step_offset: int = 0
     # If true, model-side image augmentation is enabled during training loss computation.
@@ -600,6 +602,14 @@ class TrainConfig:
     # eg. if total device is 4 and fsdp devices is 2; then the model will shard to 2 devices and run
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
+
+    # Safety net for Adam update spikes: if any single param's update exceeds this in abs value,
+    # the step's update is skipped. None disables the check.
+    max_update_abs_max: float | None = None
+    # If true, log which param path caused the update spike when max_update_abs_max is exceeded.
+    log_update_argmax_on_spike: bool = False
+    # Debug: print encoder_norm.bias before/after checkpoint save and compare.
+    debug_checkpoint_bias: bool = False
 
     @property
     def assets_dirs(self) -> pathlib.Path:
@@ -1068,7 +1078,8 @@ _CONFIGS = [
             action_dim=32,
             action_horizon=30,
             discrete_state_input=True,
-            loss_action_dim=14,
+            # Only right arm (dims 6-11) + right hand (dim 13) contribute to loss; left arm/hand and pad dims are masked out.
+            loss_action_dims=(6, 7, 8, 9, 10, 11, 13),
             # Crop/rotate disabled; mild color jitter on all channels, p=0.1.
             image_aug_crop_enabled=False,
             image_aug_brightness=0.08,
@@ -1086,28 +1097,255 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "/home/xudi_ge/openpi-assets/checkpoints/pi05_base/params"
         ),
+        # 4-phase LR: 1k warmup -> 2e-5; 5k linear -> 1e-5 (step 6k); 20k cosine -> 1e-6 (step 26k);
+        # 34k linear -> 1e-7 (step 60k). Total 60k steps.
         lr_schedule=_optimizer.WarmLinearCosineSchedule(
             peak_lr=2e-5,
             linear_end_lr=1e-5,
-            cosine_end_lr=1e-7,
+            cosine_end_lr=1e-6,
+            final_end_lr=1e-7,
             warmup_steps=1_000,
             linear_end_step=6_000,
-            total_steps=40_000,
+            cosine_end_step=26_000,
+            total_steps=60_000,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=None,
         batch_size=32,
         num_workers=4,
-        num_train_steps=40_000,
-        log_interval=10,
+        # Local step 0 corresponds to global step 12000; train the remaining 48000 steps.
+        num_train_steps=48_000,
+        log_interval=50,
         save_interval=1000,
         keep_period=3000,
         checkpoint_base_dir="/data/gxdcheckpoint",
         train_image_augment=True,
+        # Safety net + diagnostics for Adam update spikes: skip a step's update if any single
+        # param's update exceeds 100 in abs value, and log which param path caused it.
+        max_update_abs_max=100.0,
+        log_update_argmax_on_spike=True,
         overwrite=True,
         resume=False,
         exp_name="dataV5_final_v3src_pad",
         wandb_enabled=False,
+    ),
+        TrainConfig(
+        name="dataV5_final_v3src_pad_linear",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            # Only right arm (dims 6-11) + right hand (dim 13) contribute to loss; left arm/hand and pad dims are masked out.
+            loss_action_dims=(6, 7, 8, 9, 10, 11, 13),
+            # Crop/rotate disabled; mild color jitter on all channels, p=0.1.
+            image_aug_crop_enabled=False,
+            image_aug_brightness=0.08,
+            image_aug_contrast=0.08,
+            image_aug_saturation=0.08,
+            image_aug_hue=0.03,
+            image_aug_prob=0.1,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/openpi_V5_mcap0625_v3src_pad",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05_v3src_pad"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/data/gxdcheckpoint/dataV5_final_v3src_pad/dataV5_final_v3src_pad/12000/params"
+        ),
+        # 500-step warmup to 9e-6, then linear decay to 5e-7 over 40k steps.
+        lr_schedule=_optimizer.WarmupLinearDecaySchedule(
+            warmup_steps=500,
+            peak_lr=9e-6,
+            decay_end_step=40_000,
+            decay_lr=5e-7,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        batch_size=32,
+        num_workers=4,
+        num_train_steps=60_000,
+        log_interval=50,
+        save_interval=1000,
+        keep_period=3000,
+        checkpoint_base_dir="/data/gxdcheckpoint",
+        train_image_augment=True,
+        # Safety net + diagnostics for Adam update spikes: skip a step's update if any single
+        # param's update exceeds 100 in abs value, and log which param path caused it.
+        max_update_abs_max=100.0,
+        log_update_argmax_on_spike=True,
+        overwrite=True,
+        resume=False,
+        exp_name="dataV5_final_v3src_pad",
+        wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="dataV5_final_v3src_pad_conti",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            # Only right arm (dims 6-11) + right hand (dim 13) contribute to loss; left arm/hand and pad dims are masked out.
+            loss_action_dims=(6, 7, 8, 9, 10, 11, 13),
+            # Crop/rotate disabled; mild color jitter on all channels, p=0.1.
+            image_aug_crop_enabled=False,
+            image_aug_brightness=0.08,
+            image_aug_contrast=0.08,
+            image_aug_saturation=0.08,
+            image_aug_hue=0.03,
+            image_aug_prob=0.1,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/openpi_V5_mcap0625_v3src_pad",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05_v3src_pad"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        # Standard resume: 12000-step checkpoint has been copied into the conti checkpoint
+        # dir. resume=True restores FULL train_state (params + Adam moments) via the normal
+        # restore_state path, which correctly handles nnx.State in opt_state.
+        weight_loader=weight_loaders.NoOpWeightLoader(),
+        # 4-phase LR (same shape as dataV5_final_v3src_pad): 1k warmup -> 2e-5; 5k linear -> 1e-5;
+        # 20k cosine -> 1e-6; 34k linear -> 1e-7. schedule_offset=1 so step 12000 uses LR@12001.
+        lr_schedule=_optimizer.WarmLinearCosineSchedule(
+            peak_lr=2e-5,
+            linear_end_lr=1e-5,
+            cosine_end_lr=1e-6,
+            final_end_lr=1e-7,
+            warmup_steps=1_000,
+            linear_end_step=6_000,
+            cosine_end_step=26_000,
+            total_steps=60_000,
+            schedule_offset=1,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        batch_size=32,
+        num_workers=4,
+        # num_train_steps=60000 because train_state.step is restored to 12000; loop runs 12000->60000.
+        num_train_steps=60_000,
+        log_interval=50,
+        save_interval=3000,
+        keep_period=6000,
+        checkpoint_base_dir="/data/gxdcheckpoint",
+        train_image_augment=True,
+        # Safety net + diagnostics for Adam update spikes: skip a step's update if any single
+        # param's update exceeds 100 in abs value, and log which param path caused it.
+        max_update_abs_max=100.0,
+        log_update_argmax_on_spike=True,
+        overwrite=False,
+        resume=True,
+        log_step_offset=0,
+        exp_name="dataV5_final_v3src_pad_conti",
+        wandb_enabled=False,
+    ),
+
+    TrainConfig(
+        name="dataV5_final_v3src_pad_v2",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dims=(6, 7, 8, 9, 10, 11, 13),
+            image_aug_crop_enabled=False,
+            image_aug_brightness=0.08,
+            image_aug_contrast=0.08,
+            image_aug_saturation=0.08,
+            image_aug_hue=0.03,
+            image_aug_prob=0.1,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/openpi_V5_mcap0625_v3src_pad",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05_v3src_pad"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/xudi_ge/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        freeze_filter=nnx.All(
+            nnx.Param,
+            nnx_utils.PathRegex(".*PaliGemma/img.*"),
+        ),
+        lr_schedule=_optimizer.WarmLinearCosineSchedule(
+            peak_lr=2e-5,
+            linear_end_lr=1e-5,
+            cosine_end_lr=1e-6,
+            final_end_lr=1e-7,
+            warmup_steps=1_000,
+            linear_end_step=6_000,
+            cosine_end_step=26_000,
+            total_steps=60_000,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        batch_size=32,
+        num_workers=4,
+        num_train_steps=60_000,
+        log_interval=50,
+        save_interval=2000,
+        keep_period=4000,
+        checkpoint_base_dir="/data/gxdcheckpoint",
+        train_image_augment=True,
+        max_update_abs_max=100.0,
+        log_update_argmax_on_spike=True,
+        overwrite=True,
+        resume=False,
+        exp_name="dataV5_final_v3src_pad_v2",
+        wandb_enabled=False,
+    ),
+
+    TrainConfig(
+        name="debug_encoder_norm",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            loss_action_dims=(6, 7, 8, 9, 10, 11, 13),
+            image_aug_crop_enabled=False,
+            image_aug_brightness=0.08,
+            image_aug_contrast=0.08,
+            image_aug_saturation=0.08,
+            image_aug_hue=0.03,
+            image_aug_prob=0.1,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/openpi_V5_mcap0625_v3src_pad",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/gxd_pi05_v3src_pad"),
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/xudi_ge/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=5,
+            peak_lr=1e-6,
+            decay_steps=20,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        batch_size=2,
+        num_workers=0,
+        num_train_steps=10,
+        log_interval=1,
+        save_interval=10,
+        keep_period=10,
+        checkpoint_base_dir="/data/gxdcheckpoint",
+        max_update_abs_max=100.0,
+        log_update_argmax_on_spike=True,
+        debug_checkpoint_bias=True,
+        overwrite=True,
+        resume=False,
+        exp_name="debug_encoder_norm",
+        wandb_enabled=False,
+        tensorboard_enabled=False,
     ),
 
     # RoboArena & PolaRiS configs.

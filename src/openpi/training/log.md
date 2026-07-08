@@ -2,7 +2,7 @@
 
   # 单个 run
   /home/xudi_ge/openpi/.venv/bin/tensorboard \
-    --logdir /data/gxdcheckpoint/backup/gxd_pi05_standard_state_from6000_lrhalf/tb\
+    --logdir /data/gxdcheckpoint/dataV5_final_v3src_pad/dataV5_final_v3src_pad/tb\
     --host 0.0.0.0 \
     --port 6015 \
     --reload_interval 15
@@ -14,9 +14,9 @@
     --reload_interval 15
 
   /home/xudi_ge/openpi/.venv/bin/tensorboard \
-    --logdir  /data/checkpoint_629/gxd_pi05_629/gxd_pi05_629_ema099_2gpu/tb \
+    --logdir  /data/gxdcheckpoint/dataV5_final_v3src_pad/dataV5_final_v3src_pad/tb \
     --host 0.0.0.0 \
-    --port 6025 \
+    --port 6031 \
     --reload_interval 15
 
 
@@ -25,10 +25,10 @@
 /data/gxdcheckpoint/train_from5k_V5/train_from5k_V5/tb
   # 合并多个 run（必须用 --logdir_spec，不能用逗号拼 --logdir）
   /home/xudi_ge/openpi/.venv/bin/tensorboard \
-    --logdir_spec=from10000:/data/gxdcheckpoint/gxd_pi05_from10000_staged_lr/gxd_pi05_from10000_staged_lr/tb,from2000:/data/gxdcheckpoint/gxd_pi05_from2000_staged_lr/gxd_pi05_from2000_staged_lr/tb \
+    --logdir_spec=14dim:/data/gxdcheckpoint/dataV5_final_v3src_pad/dataV5_final_v3src_pad/tb,7dim:/data/gxdcheckpoint/dataV5_final_v3src_pad/dataV5_final_v3src_pad/tb \
     --host 0.0.0.0 \
-    --port 6011 \
-    --reload_interval 15
+    --port 6012 \
+    --reload_interval 15x
 
 
     pour water from bottle to cup

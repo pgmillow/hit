@@ -6,6 +6,30 @@ import numpy as np
 from openpi import transforms
 
 
+# Action layout (from data/convert_lerobot_v3_to_v2.py, 14-dim):
+#   [0:6]  left_arm_cmd_pos    [6:12] right_arm_cmd_pos    [12] left_hand_cmd_pos    [13] right_hand_cmd_pos
+# Only right arm + right hand (7 dims total) are used as model action input/output; left part is zeroed.
+RIGHT_ACTION_DIMS = (6, 7, 8, 9, 10, 11, 13)
+
+# State layout (26-dim, from convert_lerobot_v3_to_v2.py STATE_NAMES):
+#   [0:6]  left_arm_qpos    [6:12] right_arm_qpos    [12] left_hand_qpos    [13] right_hand_qpos
+#   [14:20] left_ee_pose    [20:26] right_ee_pose
+# Only right side (right arm + right hand + right ee pose = 13 dims) is fed to the model; left side is zeroed.
+RIGHT_STATE_DIMS = (6, 7, 8, 9, 10, 11, 13, 20, 21, 22, 23, 24, 25)
+
+
+def _right_action_mask(num_dims: int) -> np.ndarray:
+    mask = np.zeros(num_dims, dtype=np.float32)
+    mask[list(RIGHT_ACTION_DIMS)] = 1.0
+    return mask
+
+
+def _right_state_mask(num_dims: int) -> np.ndarray:
+    mask = np.zeros(num_dims, dtype=np.float32)
+    mask[list(RIGHT_STATE_DIMS)] = 1.0
+    return mask
+
+
 def _parse_image(image) -> np.ndarray:
     image = np.asarray(image)
     if np.issubdtype(image.dtype, np.floating):
@@ -22,8 +46,12 @@ class OctopusInputs(transforms.DataTransformFn):
     def __call__(self, data: dict) -> dict:
         images = data["images"]
 
+        state = np.asarray(data["state"], dtype=np.float32)
+        # Zero out left arm / left hand / left ee pose so only the 13 right-side state dims are fed to the model.
+        state = state * _right_state_mask(state.shape[-1])
+
         inputs = {
-            "state": np.asarray(data["state"], dtype=np.float32),
+            "state": state,
             "image": {
                 "base_0_rgb": _parse_image(images["top"]),
                 "left_wrist_0_rgb": _parse_image(images["left_wrist"]),
@@ -37,7 +65,11 @@ class OctopusInputs(transforms.DataTransformFn):
         }
 
         if "actions" in data:
-            inputs["actions"] = np.asarray(data["actions"], dtype=np.float32)
+            actions = np.asarray(data["actions"], dtype=np.float32)
+            # Keep only right arm + right hand; zero out left arm and left_hand so the model
+            # only sees/learns the 7 right-side action dims (others are pad 0).
+            actions = actions * _right_action_mask(actions.shape[-1])
+            inputs["actions"] = actions
 
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
@@ -52,4 +84,7 @@ class OctopusOutputs(transforms.DataTransformFn):
     action_dim: int = 14
 
     def __call__(self, data: dict) -> dict:
-        return {"actions": np.asarray(data["actions"][..., : self.action_dim])}
+        actions = np.asarray(data["actions"][..., : self.action_dim])
+        # Zero out left arm and left_hand so only the 7 right-side dims (right arm + right hand) are returned.
+        actions = actions * _right_action_mask(self.action_dim)
+        return {"actions": actions}

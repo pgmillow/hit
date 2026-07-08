@@ -72,6 +72,27 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
         wandb.run.log_code(epath.Path(__file__).parent.parent)
 
 
+def launch_tensorboard_server(logdir: str, port: int = 6006, host: str = "0.0.0.0") -> None:
+    """Launch TensorBoard server in a background thread for remote access."""
+    import subprocess
+    import threading
+
+    def _run():
+        cmd = [
+            "tensorboard",
+            "--logdir", logdir,
+            "--port", str(port),
+            "--host", host,
+            "--bind_all",
+        ]
+        logging.info("[stage] tensorboard: launching server on %s:%s", host, port)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    logging.info("[stage] tensorboard: server started (http://localhost:%s)", port)
+
+
 def init_tensorboard(config: _config.TrainConfig, *, enabled: bool = True) -> SummaryWriter | None:
     if not enabled:
         return None
@@ -80,6 +101,11 @@ def init_tensorboard(config: _config.TrainConfig, *, enabled: bool = True) -> Su
     tb_dir = config.checkpoint_dir / tb_subdir
     tb_dir.mkdir(parents=True, exist_ok=True)
     logging.info("[stage] tensorboard: writing logs to %s", tb_dir)
+
+    # Launch TensorBoard server for remote access
+    tb_port = getattr(config, "tensorboard_port", 6006)
+    launch_tensorboard_server(str(tb_dir), port=tb_port)
+
     return SummaryWriter(log_dir=str(tb_dir))
 
 
@@ -179,15 +205,22 @@ def train_step(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         train_image_augment = getattr(config, "train_image_augment", True)
-        chunked_loss = model.compute_loss(rng, observation, actions, train=train_image_augment)
-        return jnp.mean(chunked_loss)
+        # Use compute_loss_with_debug so we can log per-dim loss contribution (loss_dim/00 .. loss_dim/{action_dim-1}).
+        chunked_loss, debug = model.compute_loss_with_debug(
+            rng, observation, actions, train=train_image_augment
+        )
+        mean_loss = jnp.mean(chunked_loss)
+        # stop_gradient on debug so value_and_grad does not track it (saves memory; aux only).
+        return mean_loss, jax.lax.stop_gradient(debug)
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    (loss, loss_debug), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
+        model, train_rng, observation, actions
+    )
     grad_norm = optax.global_norm(grads)
     grads_finite = jnp.isfinite(grad_norm)
     loss_finite = jnp.isfinite(loss)
@@ -236,6 +269,8 @@ def train_step(
         "update_abs_max": update_abs_max,
         "param_norm": optax.global_norm(kernel_params),
         "nonfinite": 1.0 - update_finite.astype(jnp.float32),
+        # Per-dim flow-matching loss contribution (only loss_action_dims entries will be non-zero).
+        **{k: v for k, v in loss_debug.items() if k.startswith("loss_dim/")},
     }
     return new_state, info
 
@@ -384,7 +419,9 @@ def main(config: _config.TrainConfig):
             if steps_per_epoch is not None:
                 reduced_info["epoch"] = global_step / steps_per_epoch
             info_str = ", ".join(
-                f"{k}={v:.3e}" if k == "lr" else f"{k}={v:.4f}" for k, v in reduced_info.items()
+                f"{k}={v:.3e}" if k == "lr" else f"{k}={v:.4f}"
+                for k, v in reduced_info.items()
+                if not k.startswith("loss_dim/")
             )
             pbar.write(f"Step {global_step}: {info_str}")
             wandb.log(reduced_info, step=global_step)
@@ -397,9 +434,51 @@ def main(config: _config.TrainConfig):
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             # Name the final checkpoint after num_train_steps so stage milestones align (e.g. 9000).
             save_step = config.num_train_steps if step == config.num_train_steps - 1 else step
+
+            # ── DEBUG: check encoder_norm.bias before/after save ──
+            if config.debug_checkpoint_bias:
+                _flat = traverse_util.flatten_dict(train_state.params.to_pure_dict(), sep='/')
+                # Try both key formats (with and without /value suffix)
+                _bias_key = None
+                for _candidate in ('PaliGemma/img/Transformer/encoder_norm/bias/value',
+                                   'PaliGemma/img/Transformer/encoder_norm/bias'):
+                    if _candidate in _flat:
+                        _bias_key = _candidate
+                        break
+                if _bias_key:
+                    _bias = _flat[_bias_key]
+                    logging.info(
+                        "[DEBUG] BEFORE save: encoder_norm.bias min=%.6e max=%.6e mean=%.6e",
+                        float(jnp.min(_bias)), float(jnp.max(_bias)), float(jnp.mean(_bias)),
+                    )
+                else:
+                    logging.info("[DEBUG] BEFORE save: encoder_norm.bias key NOT FOUND, keys containing 'encoder_norm': %s",
+                                 [k for k in _flat.keys() if 'encoder_norm' in k.lower()])
+
             logging.info("[stage] checkpoint: saving step %s", save_step)
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, save_step)
             logging.info("[stage] checkpoint: save requested for step %s", save_step)
+
+            if config.debug_checkpoint_bias:
+                # Immediately restore and compare
+                _restored = _checkpoints.restore_state(
+                    checkpoint_manager, train_state, data_loader, step=save_step
+                )
+                _flat2 = traverse_util.flatten_dict(_restored.params.to_pure_dict(), sep='/')
+                if _bias_key and _bias_key in _flat2:
+                    _bias2 = _flat2[_bias_key]
+                    logging.info(
+                        "[DEBUG] AFTER reload: encoder_norm.bias min=%.6e max=%.6e mean=%.6e",
+                        float(jnp.min(_bias2)), float(jnp.max(_bias2)), float(jnp.mean(_bias2)),
+                    )
+                    _diff = float(jnp.max(jnp.abs(_bias2 - _bias)))
+                    logging.info("[DEBUG] save/reload DIFF: max_abs_diff=%.6e", _diff)
+                    if _diff > 1.0:
+                        logging.warning("[DEBUG] *** DATA CORRUPTION DETECTED: save/reload diff = %.6e ***", _diff)
+                else:
+                    # Try finding the key in the restored state
+                    _restored_keys = [k for k in _flat2.keys() if 'encoder_norm' in k.lower()]
+                    logging.info("[DEBUG] AFTER reload: keys containing 'encoder_norm': %s", _restored_keys)
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()
