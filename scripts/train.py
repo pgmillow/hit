@@ -75,18 +75,35 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
 def launch_tensorboard_server(logdir: str, port: int = 6006, host: str = "0.0.0.0") -> None:
     """Launch TensorBoard server in a background thread for remote access."""
     import subprocess
+    import sys
     import threading
+    from pathlib import Path
 
     def _run():
-        cmd = [
-            "tensorboard",
-            "--logdir", logdir,
-            "--port", str(port),
-            "--host", host,
+        # Prefer the venv that is running train.py; bare "tensorboard" is often missing from PATH.
+        tb_bin = Path(sys.executable).resolve().parent / "tensorboard"
+        if tb_bin.is_file():
+            cmd = [str(tb_bin)]
+        else:
+            cmd = [sys.executable, "-m", "tensorboard.main"]
+        cmd += [
+            "--logdir",
+            logdir,
+            "--port",
+            str(port),
+            "--host",
+            host,
             "--bind_all",
         ]
-        logging.info("[stage] tensorboard: launching server on %s:%s", host, port)
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logging.info("[stage] tensorboard: launching server on %s:%s via %s", host, port, cmd[0])
+        try:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except FileNotFoundError:
+            logging.warning(
+                "[stage] tensorboard: executable not found (%s); logs still written to %s",
+                cmd[0],
+                logdir,
+            )
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()

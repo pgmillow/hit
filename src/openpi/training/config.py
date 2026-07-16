@@ -470,6 +470,8 @@ class LeRobotOctopusDataConfig(DataConfigFactory):
 
     action_dim: int = 14
     clip_normalized_state: float | None = None
+    # If True, keep full left+right state/action (for dual-arm tasks like double_V1 pour).
+    bimanual: bool = False
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -490,8 +492,8 @@ class LeRobotOctopusDataConfig(DataConfigFactory):
             ]
         )
         data_transforms = _transforms.Group(
-            inputs=[octopus_policy.OctopusInputs()],
-            outputs=[octopus_policy.OctopusOutputs(action_dim=self.action_dim)],
+            inputs=[octopus_policy.OctopusInputs(bimanual=self.bimanual)],
+            outputs=[octopus_policy.OctopusOutputs(action_dim=self.action_dim, bimanual=self.bimanual)],
         )
         model_transforms = ModelTransformFactory()(model_config)
         if self.clip_normalized_state is not None:
@@ -1346,6 +1348,65 @@ _CONFIGS = [
         exp_name="debug_encoder_norm",
         wandb_enabled=False,
         tensorboard_enabled=False,
+    ),
+
+    # Dual-arm pour-water (double_V1), 60 Hz OpenPI-repacked dataset.
+    # Recipe: 4×80GB, global batch 64, 8 epochs, full FT, cosine 5e-5→5e-7.
+    # Data: /data/double_V1_openpi -> ~/.cache/huggingface/lerobot/local/double_V1
+    # steps/epoch = ceil(312683/64) = 4886; 8 epochs -> 39088 steps.
+    # If OOM: first try XLA_PYTHON_CLIENT_MEM_FRACTION=0.95 (JAX default is only 0.75).
+    TrainConfig(
+        name="pi05_double_V1",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=30,
+            discrete_state_input=True,
+            # Full 14-D bimanual action (L/R arm 6+6 + L/R hand 1+1); pad dims 14..31 masked.
+            loss_action_dims=tuple(range(14)),
+            image_aug_crop_enabled=False,
+            image_aug_brightness=0.08,
+            image_aug_contrast=0.08,
+            image_aug_saturation=0.08,
+            image_aug_hue=0.03,
+            image_aug_prob=0.1,
+        ),
+        data=LeRobotOctopusDataConfig(
+            repo_id="local/double_V1",
+            assets=AssetsConfig(assets_dir="/home/xudi_ge/openpi/assets/double_V1_bimanual"),
+            bimanual=True,
+            clip_normalized_state=1.0,
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/home/xudi_ge/openpi-assets/checkpoints/pi05_base/params"
+        ),
+        # Cosine with short warmup: 0→5e-5 over 2k, then cosine to 5e-7 by step 39088.
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=2_000,
+            peak_lr=5e-5,
+            decay_steps=39_088,
+            decay_lr=5e-7,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        # All params trainable (no LoRA / no freeze filter).
+        freeze_filter=nnx.Nothing(),
+        ema_decay=None,
+        batch_size=64,  # global; ~16/GPU on 4 cards
+        num_workers=8,
+        num_train_steps=39_088,  # 8 epochs × 4886 steps/epoch
+        log_interval=50,
+        save_interval=4_886,  # once per epoch
+        keep_period=4_886,  # keep every epoch ckpt
+        checkpoint_base_dir="/data/final_double_hands_openpi",
+        train_image_augment=True,
+        max_update_abs_max=100.0,
+        log_update_argmax_on_spike=True,
+        overwrite=True,
+        resume=False,
+        exp_name="pi05_double_V1",
+        wandb_enabled=False,
+        tensorboard_enabled=True,
     ),
 
     # RoboArena & PolaRiS configs.

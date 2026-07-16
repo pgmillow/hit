@@ -41,14 +41,23 @@ def _parse_image(image) -> np.ndarray:
 
 @dataclasses.dataclass(frozen=True)
 class OctopusInputs(transforms.DataTransformFn):
-    """Inputs for Octopus MCAP datasets converted to LeRobot format."""
+    """Inputs for Octopus MCAP datasets converted to LeRobot format.
+
+    By default (``bimanual=False``) left-arm / left-hand / left-ee dims are zeroed so the
+    model only learns the right side (legacy single-arm pour setups).
+    Set ``bimanual=True`` to keep the full 26-D state and 14-D action.
+    """
+
+    bimanual: bool = False
 
     def __call__(self, data: dict) -> dict:
         images = data["images"]
 
         state = np.asarray(data["state"], dtype=np.float32)
-        # Zero out left arm / left hand / left ee pose so only the 13 right-side state dims are fed to the model.
-        state = state * _right_state_mask(state.shape[-1])
+        if not self.bimanual:
+            # Zero out left arm / left hand / left ee pose so only the 13 right-side state dims
+            # are fed to the model.
+            state = state * _right_state_mask(state.shape[-1])
 
         inputs = {
             "state": state,
@@ -66,9 +75,10 @@ class OctopusInputs(transforms.DataTransformFn):
 
         if "actions" in data:
             actions = np.asarray(data["actions"], dtype=np.float32)
-            # Keep only right arm + right hand; zero out left arm and left_hand so the model
-            # only sees/learns the 7 right-side action dims (others are pad 0).
-            actions = actions * _right_action_mask(actions.shape[-1])
+            if not self.bimanual:
+                # Keep only right arm + right hand; zero out left arm and left_hand so the model
+                # only sees/learns the 7 right-side action dims (others are pad 0).
+                actions = actions * _right_action_mask(actions.shape[-1])
             inputs["actions"] = actions
 
         if "prompt" in data:
@@ -82,9 +92,11 @@ class OctopusOutputs(transforms.DataTransformFn):
     """Outputs for Octopus policy inference."""
 
     action_dim: int = 14
+    bimanual: bool = False
 
     def __call__(self, data: dict) -> dict:
         actions = np.asarray(data["actions"][..., : self.action_dim])
-        # Zero out left arm and left_hand so only the 7 right-side dims (right arm + right hand) are returned.
-        actions = actions * _right_action_mask(self.action_dim)
+        if not self.bimanual:
+            # Zero out left arm and left_hand so only the 7 right-side dims are returned.
+            actions = actions * _right_action_mask(self.action_dim)
         return {"actions": actions}
